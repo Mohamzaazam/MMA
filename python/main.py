@@ -146,7 +146,7 @@ class PPO(object):
 		self.clip_ratio = self.default_clip_ratio
 		self.optimizer = optim.Adam(self.model.parameters(),lr=self.learning_rate)
 		self.optimizer_muscle = optim.Adam(self.muscle_model.parameters(),lr=self.learning_rate)
-		self.max_iteration = 50001
+		self.max_iteration = 50000
 
 		self.w_entropy = -0.001
 
