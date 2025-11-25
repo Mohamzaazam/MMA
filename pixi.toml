@@ -5,17 +5,11 @@ platforms = ["linux-64"]
 version = "0.1.0"
 
 [tasks]
-# OPTIMIZATION: Use Release build by default for maximum performance
+# Standard Release build (recommended - safe optimizations only)
 build = { cmd = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build -j4" }
 
 # Debug build for development (slower but with debug symbols)
-build-debug = { cmd = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug && ninja -C build -j$(nproc)" }
-
-# Build with Link Time Optimization (even faster, longer compile time)
-build-lto = { cmd = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_LTO=ON && ninja -C build -j4" }
-
-# Build with fast math (fastest, slightly less precise)
-build-fast = { cmd = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_FAST_MATH=ON -DENABLE_LTO=ON && ninja -C build -j4" }
+build-debug = { cmd = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug && ninja -C build -j4" }
 
 train = { cmd = "python python/main.py -d data/metadata.txt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb", OMP_NUM_THREADS = "8" } }
 
@@ -56,6 +50,7 @@ xorg-libx11 = "*"
 xorg-libxmu = "*"
 xorg-libxi = "*"
 tensorboard = ">=2.20.0,<3"
+snakeviz = ">=2.2.2,<3"
 
 [pypi-dependencies]
 torch = { version = "==2.5.1", index = "https://download.pytorch.org/whl/cu124" }

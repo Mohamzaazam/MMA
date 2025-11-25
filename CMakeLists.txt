@@ -22,6 +22,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations")
 # Release optimizations - these are safe and don't change simulation logic
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
+# NOTE: problematic (keep it here so you or agents don't accidentally enable it)
 # # Additional optimization flags for Release builds
 # if(CMAKE_BUILD_TYPE STREQUAL "Release")
 #     # Enable native CPU optimizations (uses best instruction set for your CPU)
