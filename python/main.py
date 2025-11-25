@@ -1,0 +1,468 @@
+import math
+import random
+import time
+import os
+import sys
+from datetime import datetime
+
+import collections
+from collections import namedtuple
+from collections import deque
+from itertools import count
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import torchvision.transforms as T
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.tensorboard import SummaryWriter
+
+torch.backends.cudnn.benchmark = True  # Auto-tune cuDNN kernels
+
+import numpy as np
+import pymss
+from Model import *
+# suppress VisibleDeprecationWarning
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(device)
+
+def Tensor(x):
+    if isinstance(x, np.ndarray):
+        x = torch.from_numpy(x).float()
+    elif not isinstance(x, torch.Tensor):
+        x = torch.tensor(x).float()
+    return x.to(device)
+
+Episode = namedtuple('Episode',('s','a','r', 'value', 'logprob'))
+class EpisodeBuffer(object):
+	def __init__(self):
+		self.data = []
+
+	def Push(self, *args):
+		self.data.append(Episode(*args))
+	def Pop(self):
+		self.data.pop()
+	def GetData(self):
+		return self.data
+MuscleTransition = namedtuple('MuscleTransition',('JtA','tau_des','L','b'))
+class MuscleBuffer(object):
+	def __init__(self, buff_size = 10000):
+		super(MuscleBuffer, self).__init__()
+		self.buffer = deque(maxlen=buff_size)
+
+	def Push(self,*args):
+		self.buffer.append(MuscleTransition(*args))
+
+	def Clear(self):
+		self.buffer.clear()
+Transition = namedtuple('Transition',('s','a', 'logprob', 'TD', 'GAE'))
+class ReplayBuffer(object):
+	def __init__(self, buff_size = 10000):
+		super(ReplayBuffer, self).__init__()
+		self.buffer = deque(maxlen=buff_size)
+
+	def Push(self,*args):
+		self.buffer.append(Transition(*args))
+
+	def Clear(self):
+		self.buffer.clear()
+
+# Dataset classes for DataLoader
+class TransitionDataset(Dataset):
+	def __init__(self, transitions):
+		self.transitions = transitions
+		
+	def __len__(self):
+		return len(self.transitions)
+	
+	def __getitem__(self, idx):
+		transition = self.transitions[idx]
+		return {
+			's': transition.s.astype(np.float32),
+			'a': transition.a.astype(np.float32),
+			'logprob': np.float32(transition.logprob),
+			'TD': np.float32(transition.TD),
+			'GAE': np.float32(transition.GAE)
+		}
+
+class MuscleDataset(Dataset):
+	def __init__(self, JtA, tau_des, L, b, num_action, num_muscles):
+		self.JtA = JtA
+		self.tau_des = tau_des
+		self.L = L
+		self.b = b
+		self.num_action = num_action
+		self.num_muscles = num_muscles
+		
+	def __len__(self):
+		return len(self.JtA)
+	
+	def __getitem__(self, idx):
+		return {
+			'JtA': self.JtA[idx].astype(np.float32),
+			'tau_des': self.tau_des[idx].astype(np.float32),
+			'L': self.L[idx].astype(np.float32).reshape(self.num_action, self.num_muscles),
+			'b': self.b[idx].astype(np.float32)
+		}
+
+
+class PPO(object):
+	def __init__(self,meta_file):
+		np.random.seed(seed = int(time.time()))
+		self.num_slaves = 16
+		self.env = pymss.pymss(meta_file,self.num_slaves)
+		self.use_muscle = self.env.UseMuscle()
+		self.num_state = self.env.GetNumState()
+		self.num_action = self.env.GetNumAction()
+		self.num_muscles = self.env.GetNumMuscles()
+
+		self.num_epochs = 10
+		self.num_epochs_muscle = 3
+		self.num_evaluation = 0
+		self.num_tuple_so_far = 0
+		self.num_episode = 0
+		self.num_tuple = 0
+		self.num_simulation_Hz = self.env.GetSimulationHz()
+		self.num_control_Hz = self.env.GetControlHz()
+		self.num_simulation_per_control = self.num_simulation_Hz // self.num_control_Hz
+
+		self.gamma = 0.99
+		self.lb = 0.99
+
+		self.buffer_size = 2048
+		self.batch_size = 128
+		self.muscle_batch_size = 128
+		self.replay_buffer = ReplayBuffer(30000)
+		self.muscle_buffer = {}
+
+		self.model = SimulationNN(self.num_state,self.num_action).to(device)
+		self.muscle_model = MuscleNN(self.env.GetNumTotalMuscleRelatedDofs(),self.num_action,self.num_muscles).to(device)
+
+		self.default_learning_rate = 1E-4
+		self.default_clip_ratio = 0.2
+		self.learning_rate = self.default_learning_rate
+		self.clip_ratio = self.default_clip_ratio
+		self.optimizer = optim.Adam(self.model.parameters(),lr=self.learning_rate)
+		self.optimizer_muscle = optim.Adam(self.muscle_model.parameters(),lr=self.learning_rate)
+		self.max_iteration = 50000
+
+		self.w_entropy = -0.001
+
+		self.loss_actor = 0.0
+		self.loss_critic = 0.0
+		self.loss_muscle = 0.0
+		self.rewards = []
+		self.sum_return = 0.0
+		self.max_return = -1.0
+		self.max_return_epoch = 1
+		self.tic = time.time()
+
+		self.episodes = [None]*self.num_slaves
+		for j in range(self.num_slaves):
+			self.episodes[j] = EpisodeBuffer()
+		self.env.Resets(True)
+		
+		self.writer = SummaryWriter()
+
+	def SaveModel(self):
+		self.model.save('../nn/current.pt')
+		self.muscle_model.save('../nn/current_muscle.pt')
+		
+		if self.max_return_epoch == self.num_evaluation:
+			self.model.save('../nn/max.pt')
+			self.muscle_model.save('../nn/max_muscle.pt')
+		if self.num_evaluation%100 == 0:
+			self.model.save('../nn/'+str(self.num_evaluation//100)+'.pt')
+			self.muscle_model.save('../nn/'+str(self.num_evaluation//100)+'_muscle.pt')
+
+	def LoadModel(self,path):
+		self.model.load('../nn/'+path+'.pt')
+		self.muscle_model.load('../nn/'+path+'_muscle.pt')
+
+	def ComputeTDandGAE(self):
+		self.replay_buffer.Clear()
+		self.muscle_buffer = {}
+		self.sum_return = 0.0
+		for epi in self.total_episodes:
+			data = epi.GetData()
+			size = len(data)
+			if size == 0:
+				continue
+			states, actions, rewards, values, logprobs = zip(*data)
+
+			values = np.concatenate((values, np.zeros(1)), axis=0)
+			advantages = np.zeros(size)
+			ad_t = 0
+
+			epi_return = 0.0
+			for i in reversed(range(len(data))):
+				epi_return += rewards[i]
+				delta = rewards[i] + values[i+1] * self.gamma - values[i]
+				ad_t = delta + self.gamma * self.lb * ad_t
+				advantages[i] = ad_t
+			self.sum_return += epi_return
+			TD = values[:size] + advantages
+			
+			for i in range(size):
+				self.replay_buffer.Push(states[i], actions[i], logprobs[i], TD[i], advantages[i])
+		self.num_episode = len(self.total_episodes)
+		self.num_tuple = len(self.replay_buffer.buffer)
+		print('SIM : {}'.format(self.num_tuple))
+		self.num_tuple_so_far += self.num_tuple
+
+		self.env.ComputeMuscleTuples()
+
+		self.muscle_buffer['JtA'] = self.env.GetMuscleTuplesJtA()
+		self.muscle_buffer['TauDes'] = self.env.GetMuscleTuplesTauDes()
+		self.muscle_buffer['L'] = self.env.GetMuscleTuplesL()
+		self.muscle_buffer['b'] = self.env.GetMuscleTuplesb()
+		print(self.muscle_buffer['JtA'].shape)
+	def GenerateTransitions(self):
+		self.total_episodes = []
+		states = [None]*self.num_slaves
+		actions = [None]*self.num_slaves
+		rewards = [None]*self.num_slaves
+		states_next = [None]*self.num_slaves
+		states = self.env.GetStates()
+		local_step = 0
+		terminated = [False]*self.num_slaves
+		counter = 0
+		while True:
+			counter += 1
+			if counter%10 == 0: print('SIM : {}'.format(local_step),end='\r')
+			a_dist,v = self.model(Tensor(states))
+			actions = a_dist.sample().cpu().detach().numpy()
+			# actions = a_dist.loc.cpu().detach().numpy()
+			logprobs = a_dist.log_prob(Tensor(actions)).cpu().detach().numpy().reshape(-1)
+			values = v.cpu().detach().numpy().reshape(-1)
+			self.env.SetActions(actions)
+			if self.use_muscle:
+				mt = Tensor(self.env.GetMuscleTorques())
+				for i in range(self.num_simulation_per_control//2):
+					dt = Tensor(self.env.GetDesiredTorques())
+					activations = self.muscle_model(mt,dt).cpu().detach().numpy()
+					self.env.SetActivationLevels(activations)
+
+					self.env.Steps(2)
+			else:
+				self.env.StepsAtOnce()
+
+			for j in range(self.num_slaves):
+				nan_occur = False
+				terminated_state = True
+
+				if np.any(np.isnan(states[j])) or np.any(np.isnan(actions[j])) or np.any(np.isnan(states[j])) or np.any(np.isnan(values[j])) or np.any(np.isnan(logprobs[j])):
+					nan_occur = True
+				
+				elif self.env.IsEndOfEpisode(j) is False:
+					terminated_state = False
+					rewards[j] = self.env.GetReward(j)
+					self.episodes[j].Push(states[j], actions[j], rewards[j], values[j], logprobs[j])
+					local_step += 1
+
+				if terminated_state or (nan_occur is True):
+					if (nan_occur is True):
+						self.episodes[j].Pop()
+					self.total_episodes.append(self.episodes[j])
+					self.episodes[j] = EpisodeBuffer()
+
+					self.env.Reset(True,j)
+
+			if local_step >= self.buffer_size:
+				break
+				
+			states = self.env.GetStates()
+		
+	def OptimizeSimulationNN(self):
+		# Create dataset and dataloader
+		all_transitions = list(self.replay_buffer.buffer)
+		dataset = TransitionDataset(all_transitions)
+		
+		for j in range(self.num_epochs):
+			# Create DataLoader with shuffle and pinned memory
+			dataloader = DataLoader(
+				dataset, 
+				batch_size=self.batch_size, 
+				shuffle=True,
+				num_workers=0,
+				pin_memory=True,
+				drop_last=False
+			)
+			
+			for batch in dataloader:
+				# Data is already on correct dtype from Dataset
+				stack_s = batch['s']
+				stack_a = batch['a']
+				stack_lp = batch['logprob']
+				stack_td = batch['TD']
+				stack_gae = batch['GAE']
+				
+
+				a_dist,v = self.model(Tensor(stack_s))
+				'''Critic Loss'''
+				loss_critic = ((v-Tensor(stack_td)).pow(2)).mean()
+				
+				'''Actor Loss'''
+				ratio = torch.exp(a_dist.log_prob(Tensor(stack_a))-Tensor(stack_lp))
+				stack_gae_np = stack_gae.cpu().numpy()
+				stack_gae_np = (stack_gae_np-stack_gae_np.mean())/(stack_gae_np.std()+ 1E-5)
+				stack_gae_t = Tensor(stack_gae_np)
+				surrogate1 = ratio * stack_gae_t
+				surrogate2 = torch.clamp(ratio,min =1.0-self.clip_ratio,max=1.0+self.clip_ratio) * stack_gae_t
+				loss_actor = - torch.min(surrogate1,surrogate2).mean()
+				'''Entropy Loss'''
+				loss_entropy = - self.w_entropy * a_dist.entropy().mean()
+				
+				loss = loss_actor + loss_entropy + loss_critic
+
+				self.loss_actor = loss_actor.cpu().detach().numpy().tolist()
+				self.loss_critic = loss_critic.cpu().detach().numpy().tolist()
+
+				self.optimizer.zero_grad()
+				loss.backward()
+				for param in self.model.parameters():
+					if param.grad is not None:
+						param.grad.data.clamp_(-0.5,0.5)
+				self.optimizer.step()
+			print('Optimizing sim nn : {}/{}'.format(j+1,self.num_epochs),end='\r')
+		print('')
+
+
+	def generate_shuffle_indices(self, batch_size, minibatch_size):
+		n = batch_size
+		m = minibatch_size
+		p = np.random.permutation(n)
+
+		r = m - n%m
+		if r>0:
+			p = np.hstack([p,np.random.randint(0,n,r)])
+
+		p = p.reshape(-1,m)
+		return p
+
+	def OptimizeMuscleNN(self):
+		# Create dataset and dataloader
+		dataset = MuscleDataset(
+			self.muscle_buffer['JtA'],
+			self.muscle_buffer['TauDes'],
+			self.muscle_buffer['L'],
+			self.muscle_buffer['b'],
+			self.num_action,
+			self.num_muscles
+		)
+		
+		for j in range(self.num_epochs_muscle):
+			# Create DataLoader with shuffle and pinned memory
+			dataloader = DataLoader(
+				dataset,
+				batch_size=self.muscle_batch_size,
+				shuffle=True,
+				num_workers=0,
+				pin_memory=True,
+				drop_last=False
+			)
+			
+			for batch in dataloader:
+				stack_JtA = Tensor(batch['JtA'])
+				stack_tau_des = Tensor(batch['tau_des'])
+				stack_L = Tensor(batch['L'])
+				stack_b = Tensor(batch['b'])
+
+				activation = self.muscle_model(stack_JtA,stack_tau_des)
+				tau = torch.einsum('ijk,ik->ij',(stack_L,activation)) + stack_b
+
+				loss_reg = (activation).pow(2).mean()
+				loss_target = (((tau-stack_tau_des)/100.0).pow(2)).mean()
+
+				loss = 0.01*loss_reg + loss_target
+
+				self.optimizer_muscle.zero_grad()
+				loss.backward()
+				for param in self.muscle_model.parameters():
+					if param.grad is not None:
+						param.grad.data.clamp_(-0.5,0.5)
+				self.optimizer_muscle.step()
+
+			print('Optimizing muscle nn : {}/{}'.format(j+1,self.num_epochs_muscle),end='\r')
+		self.loss_muscle = loss.cpu().detach().numpy().tolist()
+		print('')
+	def OptimizeModel(self):
+		self.ComputeTDandGAE()
+		self.OptimizeSimulationNN()
+		if self.use_muscle:
+			self.OptimizeMuscleNN()
+		
+	def Train(self):
+		self.GenerateTransitions()
+		self.OptimizeModel()
+
+
+	def Evaluate(self):
+		self.num_evaluation = self.num_evaluation + 1
+		h = int((time.time() - self.tic)//3600.0)
+		m = int((time.time() - self.tic)//60.0)
+		s = int((time.time() - self.tic))
+		m = m - h*60
+		s = int((time.time() - self.tic))
+		s = s - h*3600 - m*60
+		if self.num_episode == 0:
+			self.num_episode = 1
+		if self.num_tuple == 0:
+			self.num_tuple = 1
+		if self.max_return < self.sum_return/self.num_episode:
+			self.max_return = self.sum_return/self.num_episode
+			self.max_return_epoch = self.num_evaluation
+		print('# {} === {}h:{}m:{}s ==='.format(self.num_evaluation,h,m,s))
+		print('||Loss Actor               : {:.4f}'.format(self.loss_actor))
+		print('||Loss Critic              : {:.4f}'.format(self.loss_critic))
+		print('||Loss Muscle              : {:.4f}'.format(self.loss_muscle))
+		print('||Noise                    : {:.3f}'.format(self.model.log_std.exp().mean()))		
+		print('||Num Transition So far    : {}'.format(self.num_tuple_so_far))
+		print('||Num Transition           : {}'.format(self.num_tuple))
+		print('||Num Episode              : {}'.format(self.num_episode))
+		print('||Avg Return per episode   : {:.3f}'.format(self.sum_return/self.num_episode))
+		print('||Avg Reward per transition: {:.3f}'.format(self.sum_return/self.num_tuple))
+		print('||Avg Step per episode     : {:.1f}'.format(self.num_tuple/self.num_episode))
+		print('||Max Avg Retun So far     : {:.3f} at #{}'.format(self.max_return,self.max_return_epoch))
+		self.rewards.append(self.sum_return/self.num_episode)
+		
+		self.writer.add_scalar('Loss/Actor', self.loss_actor, self.num_evaluation)
+		self.writer.add_scalar('Loss/Critic', self.loss_critic, self.num_evaluation)
+		self.writer.add_scalar('Loss/Muscle', self.loss_muscle, self.num_evaluation)
+		self.writer.add_scalar('Train/Noise', self.model.log_std.exp().mean(), self.num_evaluation)
+		self.writer.add_scalar('Train/AvgReturn', self.sum_return/self.num_episode, self.num_evaluation)
+		self.writer.add_scalar('Train/AvgReward', self.sum_return/self.num_tuple, self.num_evaluation)
+		self.writer.add_scalar('Train/AvgStep', self.num_tuple/self.num_episode, self.num_evaluation)
+		self.writer.add_scalar('Train/MaxAvgReturn', self.max_return, self.num_evaluation)
+
+		self.SaveModel()
+		
+		print('=============================================')
+		return np.array(self.rewards)
+
+import argparse
+import os
+if __name__=="__main__":
+	parser = argparse.ArgumentParser()
+	parser.add_argument('-m','--model',help='model path')
+	parser.add_argument('-d','--meta',help='meta file')
+
+	args =parser.parse_args()
+	if args.meta is None:
+		print('Provide meta file')
+		exit()
+
+	ppo = PPO(args.meta)
+	nn_dir = '../nn'
+	if not os.path.exists(nn_dir):
+	    os.makedirs(nn_dir)
+	if args.model is not None:
+		ppo.LoadModel(args.model)
+	else:
+		ppo.SaveModel()
+	print('num states: {}, num actions: {}'.format(ppo.env.GetNumState(),ppo.env.GetNumAction()))
+	for i in range(ppo.max_iteration-5):
+		ppo.Train()
+		rewards = ppo.Evaluate()

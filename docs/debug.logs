@@ -1,0 +1,288 @@
+hamza@Azam:~/PhD/code/MMA$ time pixi run train
+✨ Pixi task (train): python python/main.py -d data/metadata.txt                                                                         
+cuda
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+save simulation nn ../nn/current.pt
+save muscle nn ../nn/current_muscle.pt
+save simulation nn ../nn/0.pt
+save muscle nn ../nn/0_muscle.pt
+num states: 136, num actions: 50
+SIM : 2001
+(2336, 1098)
+Optimizing sim nn : 10/10
+Optimizing muscle nn : 3/3
+# 1 === 0h:0m:13s ===
+||Loss Actor               : 82331.6016
+||Loss Critic              : 0.0250
+||Loss Muscle              : 0.1600
+||Noise                    : 1.011
+||Num Transition So far    : 2001
+||Num Transition           : 2001
+||Num Episode              : 280
+||Avg Return per episode   : 0.394
+||Avg Reward per transition: 0.055
+||Avg Step per episode     : 7.1
+||Max Avg Retun So far     : 0.394 at #1
+save simulation nn ../nn/current.pt
+save muscle nn ../nn/current_muscle.pt
+save simulation nn ../nn/max.pt
+save muscle nn ../nn/max_muscle.pt
+=============================================
+SIM : 1966
+(2208, 1098)
+Optimizing sim nn : 10/10
+Optimizing muscle nn : 3/3
+# 2 === 0h:0m:25s ===
+||Loss Actor               : 0.2907
+||Loss Critic              : 0.0047
+||Loss Muscle              : 0.2461
+||Noise                    : 1.020
+||Num Transition So far    : 3967
+||Num Transition           : 1966
+||Num Episode              : 155
+||Avg Return per episode   : 0.208
+||Avg Reward per transition: 0.016
+||Avg Step per episode     : 12.7
+||Max Avg Retun So far     : 0.394 at #1
+save simulation nn ../nn/current.pt
+save muscle nn ../nn/current_muscle.pt
+=============================================
+SIM : 2059
+(2176, 1098)
+Optimizing sim nn : 10/10
+Optimizing muscle nn : 3/3
+# 3 === 0h:0m:36s ===
+||Loss Actor               : 0.3088
+||Loss Critic              : 0.0002
+||Loss Muscle              : 0.3087
+||Noise                    : 1.024
+||Num Transition So far    : 6026
+||Num Transition           : 2059
+||Num Episode              : 116
+||Avg Return per episode   : 0.066
+||Avg Reward per transition: 0.004
+||Avg Step per episode     : 17.8
+||Max Avg Retun So far     : 0.394 at #1
+save simulation nn ../nn/current.pt
+save muscle nn ../nn/current_muscle.pt
+=============================================
+SIM : 2037
+(2192, 1098)
+Optimizing sim nn : 10/10
+Optimizing muscle nn : 3/3
+# 4 === 0h:0m:50s ===
+||Loss Actor               : 0.3328
+||Loss Critic              : 0.0001
+||Loss Muscle              : 0.2068
+||Noise                    : 1.030
+||Num Transition So far    : 8063
+||Num Transition           : 2037
+||Num Episode              : 143
+||Avg Return per episode   : 0.026
+||Avg Reward per transition: 0.002
+||Avg Step per episode     : 14.2
+||Max Avg Retun So far     : 0.394 at #1
+save simulation nn ../nn/current.pt
+save muscle nn ../nn/current_muscle.pt
+=============================================
+SIM : 2172
+(2320, 1098)
+Optimizing sim nn : 10/10
+Optimizing muscle nn : 3/3
+# 5 === 0h:1m:2s ===
+||Loss Actor               : 0.3122
+||Loss Critic              : 0.0005
+||Loss Muscle              : 0.2257
+||Noise                    : 1.035
+||Num Transition So far    : 10235
+||Num Transition           : 2172
+||Num Episode              : 263
+||Avg Return per episode   : 0.060
+||Avg Reward per transition: 0.007
+||Avg Step per episode     : 8.3
+||Max Avg Retun So far     : 0.394 at #1
+save simulation nn ../nn/current.pt
+save muscle nn ../nn/current_muscle.pt
+=============================================
+
+real    1m9.163s
+user    6m53.941s
+sys     0m8.208s
+hamza@Azam:~/PhD/code/MMA$ python python/main_multimodal.py \
+    --motion_list data/motion_list.txt \
+    --template data/metadata.txt \
+    --slaves 2
+Command 'python' not found, did you mean:
+  command 'python3' from deb python3
+  command 'python' from deb python-is-python3
+hamza@Azam:~/PhD/code/MMA$ pixi shell
+
+(MASS) hamza@Azam:~/PhD/code/MMA$ python python/main_multimodal.py \
+    --motion_list data/motion_list.txt \
+    --template data/metadata.txt \
+    --slaves 2
+Using device: cuda
+Loading motion configurations...
+  Generated metadata for 'backflip': data/metadata_backflip.txt
+  Generated metadata for 'balance': data/metadata_balance.txt
+  Generated metadata for 'cart': data/metadata_cart.txt
+  Generated metadata for 'dance': data/metadata_dance.txt
+  Generated metadata for 'kick': data/metadata_kick.txt
+  Generated metadata for 'pirouette': data/metadata_pirouette.txt
+  Generated metadata for 'run': data/metadata_run.txt
+  Generated metadata for 'walk': data/metadata_walk.txt
+  Generated metadata for 'walk_fullbody': data/metadata_walk_fullbody.txt
+Loaded 9 motions:
+  - backflip (cyclic=True)
+  - balance (cyclic=True)
+  - cart (cyclic=True)
+  - dance (cyclic=True)
+  - kick (cyclic=True)
+  - pirouette (cyclic=True)
+  - run (cyclic=True)
+  - walk (cyclic=True)
+  - walk_fullbody (cyclic=True)
+Traceback (most recent call last):
+  File "/home/hamza/PhD/code/MMA/python/main_multimodal.py", line 577, in <module>
+    main()
+  File "/home/hamza/PhD/code/MMA/python/main_multimodal.py", line 550, in main
+    ppo = MultimodalPPO(
+          ^^^^^^^^^^^^^^
+  File "/home/hamza/PhD/code/MMA/python/main_multimodal.py", line 133, in __init__
+    import pymss
+ModuleNotFoundError: No module named 'pymss'
+(MASS) hamza@Azam:~/PhD/code/MMA$ pixi run train_multimodal
+✨ Pixi task (train_multimodal): python python/main_multimodal.py --motion_list data/motion_list.txt --template data/metadata.txt --slaves 2                                                                                                                                      
+Using device: cuda
+Loading motion configurations...
+  Generated metadata for 'backflip': data/metadata_backflip.txt
+  Generated metadata for 'balance': data/metadata_balance.txt
+  Generated metadata for 'cart': data/metadata_cart.txt
+  Generated metadata for 'dance': data/metadata_dance.txt
+  Generated metadata for 'kick': data/metadata_kick.txt
+  Generated metadata for 'pirouette': data/metadata_pirouette.txt
+  Generated metadata for 'run': data/metadata_run.txt
+  Generated metadata for 'walk': data/metadata_walk.txt
+  Generated metadata for 'walk_fullbody': data/metadata_walk_fullbody.txt
+Loaded 9 motions:
+  - backflip (cyclic=True)
+  - balance (cyclic=True)
+  - cart (cyclic=True)
+  - dance (cyclic=True)
+  - kick (cyclic=True)
+  - pirouette (cyclic=True)
+  - run (cyclic=True)
+  - walk (cyclic=True)
+  - walk_fullbody (cyclic=True)
+Initializing MultimodalEnvManager with 9 motions...
+  [1/9] Loading 'backflip'...
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+  [2/9] Loading 'balance'...
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+  [3/9] Loading 'cart'...
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+  [4/9] Loading 'dance'...
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+  [5/9] Loading 'kick'...
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+  [6/9] Loading 'pirouette'...
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+  [7/9] Loading 'run'...
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+  [8/9] Loading 'walk'...
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+  [9/9] Loading 'walk_fullbody'...
+Human(DOFs : 56)
+Ground(DOFs : 0)
+Human(DOFs : 56)
+Ground(DOFs : 0)
+  Initialized 9 environments, 18 total slaves
+
+Environment info:
+  Total slaves: 18
+  Num motions: 9
+  Num state: 136
+  Num action: 50
+  Use muscle: True
+save simulation nn ../nn/multimodal_current.pt
+save muscle nn ../nn/multimodal_current_muscle.pt
+save simulation nn ../nn/multimodal_0.pt
+save muscle nn ../nn/multimodal_0_muscle.pt
+
+Num states: 136, num actions: 50
+Starting multimodal training with 9 motions...
+
+Error [BoxedLcpConstraintSolver.cpp:296] [BoxedLcpConstraintSolver] The solution of LCP includes NAN values: nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan. We're setting it zero for safety. Consider using more robust solver such as PGS as a secondary solver. If this happens even with PGS solver, please report this as a bug.
+Error [BoxedLcpConstraintSolver.cpp:296] [BoxedLcpConstraintSolver] The solution of LCP includes NAN values: -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan. We're setting it zero for safety. Consider using more robust solver such as PGS as a secondary solver. If this happens even with PGS solver, please report this as a bug.
+Error [BoxedLcpConstraintSolver.cpp:296] [BoxedLcpConstraintSolver] The solution of LCP includes NAN values: -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan -nan. We're setting it zero for safety. Consider using more robust solver such as PGS as a secondary solver. If this happens even with PGS solver, please report this as a bug.
+Error [BoxedLcpConstraintSolver.cpp:296] [BoxedLcpConstraintSolver] The solution of LCP includes NAN values: nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan nan. We're setting it zero for safety. Consider using more robust solver such as PGS as a secondary solver. If this happens even with PGS solver, please report this as a bug.
+^CTraceback (most recent call last):
+  File "/home/hamza/PhD/code/MMA/python/main_multimodal.py", line 577, in <module>
+    main()
+  File "/home/hamza/PhD/code/MMA/python/main_multimodal.py", line 572, in main
+    ppo.Train()
+  File "/home/hamza/PhD/code/MMA/python/main_multimodal.py", line 471, in Train
+    self.GenerateTransitions()
+  File "/home/hamza/PhD/code/MMA/python/main_multimodal.py", line 325, in GenerateTransitions
+    dt = Tensor(self.env.GetDesiredTorques())
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/hamza/PhD/code/MMA/python/multimodal_env.py", line 291, in GetDesiredTorques
+    torques_list.append(env.GetDesiredTorques())
+                        ^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+(MASS) hamza@Azam:~/PhD/code/MMA$ 

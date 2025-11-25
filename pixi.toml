@@ -1,0 +1,60 @@
+[workspace]
+channels = ["conda-forge"]
+name = "MASS"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+# Standard Release build (recommended - safe optimizations only)
+build = { cmd = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build -j4" }
+
+# Debug build for development (slower but with debug symbols)
+build-debug = { cmd = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug && ninja -C build -j4" }
+
+train = { cmd = "python python/main.py -d data/metadata.txt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb", OMP_NUM_THREADS = "8" } }
+
+train_multimodal = { cmd = "python python/main_multimodal.py --motion_list data/motion_list.txt --template data/metadata.txt --slaves 4", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb", OMP_NUM_THREADS = "8" } }
+
+# Training with performance monitoring
+train-profile = { cmd = "python -m cProfile -o profile.prof python/main.py -d data/metadata.txt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb" } }
+
+tensorboard = "tensorboard --logdir=runs --host 0.0.0.0 --port 6006"
+render = { cmd = "./build/render data/metadata.txt", env = { PYTHONHOME = "$CONDA_PREFIX" } }
+
+# Clean build directory
+clean = "rm -rf build"
+
+[dependencies]
+eigen = ">=3.4.0,<4"
+dartsim-cpp = ">=6.16.0,<7"
+python = "3.12.*"
+pip = ">=25.3,<26"
+numpy = ">=2.3.4,<3"
+matplotlib = ">=3.10.8,<4"
+ipython = ">=9.7.0,<10"
+tinyxml = ">=2.6.2,<3"
+assimp = ">=5.4.3,<6"
+bullet = ">=3.25,<4"
+pybind11 = ">=3.0.1,<4"
+cmake = ">=3.20"
+ninja = "*"
+pkg-config = "*"
+freeglut = ">=3.2.2,<4"
+spdlog = "*"
+# OpenGL dependencies for DART GUI
+mesalib = ">=25.0.5,<26"
+mesa-libgl-cos7-x86_64 = "*"
+mesa-libgl-devel-cos7-x86_64 = "*"
+libglu = ">=9.0.3,<10"
+libgl = "*"
+glew = ">=2.2.0,<3"
+xorg-libx11 = "*"
+xorg-libxmu = "*"
+xorg-libxi = "*"
+tensorboard = ">=2.20.0,<3"
+snakeviz = ">=2.2.2,<3"
+
+[pypi-dependencies]
+torch = { version = "==2.5.1", index = "https://download.pytorch.org/whl/cu124" }
+torchvision = { version = "==0.20.1", index = "https://download.pytorch.org/whl/cu124" }
+torchaudio = { version = "==2.5.1", index = "https://download.pytorch.org/whl/cu124" }
