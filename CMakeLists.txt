@@ -22,35 +22,35 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations")
 # Release optimizations - these are safe and don't change simulation logic
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
-# Additional optimization flags for Release builds
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    # Enable native CPU optimizations (uses best instruction set for your CPU)
-    include(CheckCXXCompilerFlag)
-    check_cxx_compiler_flag("-march=native" COMPILER_SUPPORTS_MARCH_NATIVE)
-    if(COMPILER_SUPPORTS_MARCH_NATIVE)
-        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
-        message(STATUS "Enabled -march=native for CPU-specific optimizations")
-    endif()
+# # Additional optimization flags for Release builds
+# if(CMAKE_BUILD_TYPE STREQUAL "Release")
+#     # Enable native CPU optimizations (uses best instruction set for your CPU)
+#     include(CheckCXXCompilerFlag)
+#     check_cxx_compiler_flag("-march=native" COMPILER_SUPPORTS_MARCH_NATIVE)
+#     if(COMPILER_SUPPORTS_MARCH_NATIVE)
+#         set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
+#         message(STATUS "Enabled -march=native for CPU-specific optimizations")
+#     endif()
     
-    # Enable fast math (safe for physics simulations, significant speedup)
-    # Note: This is slightly less precise but much faster
-    option(ENABLE_FAST_MATH "Enable fast math optimizations" OFF)
-    if(ENABLE_FAST_MATH)
-        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -ffast-math")
-        message(STATUS "Enabled -ffast-math (less precise but faster)")
-    endif()
+#     # Enable fast math (safe for physics simulations, significant speedup)
+#     # Note: This is slightly less precise but much faster
+#     option(ENABLE_FAST_MATH "Enable fast math optimizations" OFF)
+#     if(ENABLE_FAST_MATH)
+#         set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -ffast-math")
+#         message(STATUS "Enabled -ffast-math (less precise but faster)")
+#     endif()
     
-    # Link-time optimization for better inlining across translation units
-    option(ENABLE_LTO "Enable Link Time Optimization" OFF)
-    if(ENABLE_LTO)
-        check_cxx_compiler_flag("-flto" COMPILER_SUPPORTS_LTO)
-        if(COMPILER_SUPPORTS_LTO)
-            set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -flto")
-            set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -flto")
-            message(STATUS "Enabled Link Time Optimization")
-        endif()
-    endif()
-endif()
+#     # Link-time optimization for better inlining across translation units
+#     option(ENABLE_LTO "Enable Link Time Optimization" OFF)
+#     if(ENABLE_LTO)
+#         check_cxx_compiler_flag("-flto" COMPILER_SUPPORTS_LTO)
+#         if(COMPILER_SUPPORTS_LTO)
+#             set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -flto")
+#             set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -flto")
+#             message(STATUS "Enabled Link Time Optimization")
+#         endif()
+#     endif()
+# endif()
 
 message(STATUS "CXX Release flags: ${CMAKE_CXX_FLAGS_RELEASE}")
 
