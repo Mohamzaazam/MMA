@@ -15,6 +15,7 @@ struct Anchor
 	Anchor(std::vector<dart::dynamics::BodyNode*> bns,std::vector<Eigen::Vector3d> lps,std::vector<double> ws);
 	Eigen::Vector3d GetPoint();
 };
+
 class Muscle
 {
 public:
@@ -29,7 +30,8 @@ public:
 	double Getf_p();
 	double Getl_mt();
 
-	Eigen::MatrixXd GetJacobianTranspose();
+	// OPTIMIZATION: Return const reference to cached matrix instead of creating new one
+	const Eigen::MatrixXd& GetJacobianTranspose();
 	std::pair<Eigen::VectorXd,Eigen::VectorXd> GetForceJacobianAndPassive();
 
 	int GetNumRelatedDofs(){return num_related_dofs;};
@@ -39,6 +41,10 @@ public:
 	std::vector<dart::dynamics::BodyNode*> GetRelatedBodyNodes();
 	void ComputeJacobians();
 	Eigen::VectorXd Getdl_dtheta();
+	
+	// OPTIMIZATION: Initialize cached matrices after all anchors are added
+	void InitializeCaches();
+
 public:
 	std::string name;
 	std::vector<Anchor*> mAnchors;
@@ -47,6 +53,14 @@ public:
 
 	std::vector<Eigen::Vector3d> mCachedAnchorPositions;
 	std::vector<Eigen::MatrixXd> mCachedJs;
+	
+	// OPTIMIZATION: Pre-allocated cached matrices to avoid per-frame allocations
+	Eigen::MatrixXd mCachedJt;           // Jacobian transpose
+	Eigen::VectorXd mCachedA;            // Active force component
+	Eigen::VectorXd mCachedP;            // Passive force component
+	Eigen::VectorXd mCachedJtA_reduced;  // Reduced JtA for related DOFs
+	bool mCachesInitialized;
+
 public:
 	//Dynamics
 	double g(double _l_m);

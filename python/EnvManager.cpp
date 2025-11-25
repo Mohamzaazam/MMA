@@ -7,21 +7,42 @@ EnvManager(std::string meta_file,int num_envs)
 	:mNumEnvs(num_envs)
 {
 	dart::math::seedRand();
-	omp_set_num_threads(mNumEnvs);
+	
+	// OPTIMIZATION 1: Set OpenMP thread count based on available cores
+	// Using all available threads can cause contention; often better to match physical cores
+	int max_threads = omp_get_max_threads();
+	int optimal_threads = std::min(mNumEnvs, max_threads);
+	omp_set_num_threads(optimal_threads);
+	
+	// OPTIMIZATION 2: Set OpenMP scheduling for better load balancing
+	// Dynamic scheduling helps when environments have varying workloads
+	omp_set_schedule(omp_sched_dynamic, 1);
+	
 	for(int i = 0;i<mNumEnvs;i++){
 		mEnvs.push_back(new MASS::Environment());
 		MASS::Environment* env = mEnvs.back();
-
 		env->Initialize(meta_file,false);
 	}
+	
 	muscle_torque_cols = mEnvs[0]->GetMuscleTorques().rows();
 	tau_des_cols = mEnvs[0]->GetDesiredTorques().rows();
+	
+	// OPTIMIZATION 3: Pre-allocate all matrices once
+	// This avoids repeated memory allocations during simulation
 	mEoe.resize(mNumEnvs);
 	mRewards.resize(mNumEnvs);
 	mStates.resize(mNumEnvs, GetNumState());
 	mMuscleTorques.resize(mNumEnvs, muscle_torque_cols);
 	mDesiredTorques.resize(mNumEnvs, tau_des_cols);
+	
+	// Zero-initialize to avoid undefined behavior
+	mEoe.setZero();
+	mRewards.setZero();
+	mStates.setZero();
+	mMuscleTorques.setZero();
+	mDesiredTorques.setZero();
 }
+
 int
 EnvManager::
 GetNumState()
@@ -88,91 +109,116 @@ void
 EnvManager::
 Steps(int num)
 {
-#pragma omp parallel for
-	for (int id = 0;id<mNumEnvs;++id)
+	// OPTIMIZATION 4: Use schedule(dynamic) for better load balancing
+	// when different environments may terminate at different times
+#pragma omp parallel for schedule(dynamic)
+	for (int id = 0; id < mNumEnvs; ++id)
 	{
-		for(int j=0;j<num;j++)
+		for(int j = 0; j < num; j++)
 			mEnvs[id]->Step();
 	}
 }
+
 void
 EnvManager::
 StepsAtOnce()
 {
 	int num = this->GetNumSteps();
-#pragma omp parallel for
-	for (int id = 0;id<mNumEnvs;++id)
+	
+	// OPTIMIZATION 5: Use static scheduling when workload is uniform
+	// Static has less overhead than dynamic for uniform workloads
+#pragma omp parallel for schedule(static)
+	for (int id = 0; id < mNumEnvs; ++id)
 	{
-		for(int j=0;j<num;j++)
+		for(int j = 0; j < num; j++)
 			mEnvs[id]->Step();
 	}
 }
+
 void
 EnvManager::
 Resets(bool RSI)
 {
-	for (int id = 0;id<mNumEnvs;++id)
+	// OPTIMIZATION 6: Parallelize resets as well
+	// Reset can involve significant computation
+#pragma omp parallel for schedule(static)
+	for (int id = 0; id < mNumEnvs; ++id)
 	{
 		mEnvs[id]->Reset(RSI);
 	}
 }
+
 const Eigen::VectorXd&
 EnvManager::
 IsEndOfEpisodes()
 {
-	for (int id = 0;id<mNumEnvs;++id)
+	// OPTIMIZATION 7: Parallelize episode end checks
+	// These are lightweight but parallelization still helps with many envs
+#pragma omp parallel for schedule(static)
+	for (int id = 0; id < mNumEnvs; ++id)
 	{
 		mEoe[id] = (double)mEnvs[id]->IsEndOfEpisode();
 	}
 
 	return mEoe;
 }
+
 const Eigen::MatrixXd&
 EnvManager::
 GetStates()
 {
-	for (int id = 0;id<mNumEnvs;++id)
+	// OPTIMIZATION 8: Parallelize state gathering
+#pragma omp parallel for schedule(static)
+	for (int id = 0; id < mNumEnvs; ++id)
 	{
 		mStates.row(id) = mEnvs[id]->GetState().transpose();
 	}
 
 	return mStates;
 }
+
 void
 EnvManager::
 SetActions(const Eigen::MatrixXd& actions)
 {
-	for (int id = 0;id<mNumEnvs;++id)
+	// OPTIMIZATION 9: Parallelize action setting
+#pragma omp parallel for schedule(static)
+	for (int id = 0; id < mNumEnvs; ++id)
 	{
 		mEnvs[id]->SetAction(actions.row(id).transpose());
 	}
 }
+
 const Eigen::VectorXd&
 EnvManager::
 GetRewards()
 {
-	for (int id = 0;id<mNumEnvs;++id)
+	// OPTIMIZATION 10: Parallelize reward computation
+#pragma omp parallel for schedule(static)
+	for (int id = 0; id < mNumEnvs; ++id)
 	{
 		mRewards[id] = mEnvs[id]->GetReward();
 	}
 	return mRewards;
 }
+
 const Eigen::MatrixXd&
 EnvManager::
 GetMuscleTorques()
 {
-#pragma omp parallel for
+#pragma omp parallel for schedule(static)
 	for (int id = 0; id < mNumEnvs; ++id)
 	{
 		mMuscleTorques.row(id) = mEnvs[id]->GetMuscleTorques();
 	}
 	return mMuscleTorques;
 }
+
 const Eigen::MatrixXd&
 EnvManager::
 GetDesiredTorques()
 {
-#pragma omp parallel for
+#pragma omp parallel for schedule(static)
 	for (int id = 0; id < mNumEnvs; ++id)
 	{
 		mDesiredTorques.row(id) = mEnvs[id]->GetDesiredTorques();
@@ -184,6 +230,8 @@ void
 EnvManager::
 SetActivationLevels(const Eigen::MatrixXd& activations)
 {
+	// OPTIMIZATION 11: Parallelize activation level setting
+#pragma omp parallel for schedule(static)
 	for (int id = 0; id < mNumEnvs; ++id)
 		mEnvs[id]->SetActivationLevels(activations.row(id));
 }
@@ -192,17 +240,18 @@ void
 EnvManager::
 ComputeMuscleTuples()
 {
+	// First pass: count total tuples (sequential, quick)
 	int n = 0;
-	int rows_JtA;
-	int rows_tau_des;
-	int rows_L;
-	int rows_b;
+	int rows_JtA = 0;
+	int rows_tau_des = 0;
+	int rows_L = 0;
+	int rows_b = 0;
 
-	for(int id=0;id<mNumEnvs;id++)
+	for(int id = 0; id < mNumEnvs; id++)
 	{
 		auto& tps = mEnvs[id]->GetMuscleTuples();
 		n += tps.size();
-		if(tps.size()!=0)
+		if(tps.size() != 0)
 		{
 			rows_JtA = tps[0].JtA.rows();
 			rows_tau_des = tps[0].tau_des.rows();
@@ -211,26 +260,37 @@ ComputeMuscleTuples()
 		}
 	}
 	
+	// OPTIMIZATION 12: Pre-allocate output matrices
 	mMuscleTuplesJtA.resize(n, rows_JtA);
 	mMuscleTuplesTauDes.resize(n, rows_tau_des);
 	mMuscleTuplesL.resize(n, rows_L);
 	mMuscleTuplesb.resize(n, rows_b);
 
-	int o = 0;
-	for(int id=0;id<mNumEnvs;id++)
+	// Compute offsets for each environment (for parallel filling)
+	std::vector<int> offsets(mNumEnvs + 1);
+	offsets[0] = 0;
+	for(int id = 0; id < mNumEnvs; id++)
+	{
+		offsets[id + 1] = offsets[id] + mEnvs[id]->GetMuscleTuples().size();
+	}
+
+	// OPTIMIZATION 13: Parallel tuple copying with pre-computed offsets
+#pragma omp parallel for schedule(static)
+	for(int id = 0; id < mNumEnvs; id++)
 	{
 		auto& tps = mEnvs[id]->GetMuscleTuples();
-		for(int j=0;j<tps.size();j++)
+		int offset = offsets[id];
+		for(size_t j = 0; j < tps.size(); j++)
 		{
-			mMuscleTuplesJtA.row(o) = tps[j].JtA;
-			mMuscleTuplesTauDes.row(o) = tps[j].tau_des;
-			mMuscleTuplesL.row(o) = tps[j].L;
-			mMuscleTuplesb.row(o) = tps[j].b;
-			o++;
+			mMuscleTuplesJtA.row(offset + j) = tps[j].JtA;
+			mMuscleTuplesTauDes.row(offset + j) = tps[j].tau_des;
+			mMuscleTuplesL.row(offset + j) = tps[j].L;
+			mMuscleTuplesb.row(offset + j) = tps[j].b;
 		}
 		tps.clear();
 	}
 }
+
 const Eigen::MatrixXd&
 EnvManager::
 GetMuscleTuplesJtA()
@@ -255,6 +315,7 @@ GetMuscleTuplesb()
 {
 	return mMuscleTuplesb;
 }
+
 PYBIND11_MODULE(pymss, m)
 {
 	py::class_<EnvManager>(m, "pymss")
