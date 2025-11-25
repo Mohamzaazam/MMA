@@ -222,21 +222,21 @@ class MultimodalPPO:
         """Save current and best models"""
         os.makedirs('../nn', exist_ok=True)
         
-        self.model.save('../nn/multimodal_current.pt')
-        self.muscle_model.save('../nn/multimodal_current_muscle.pt')
+        self.model.save('./nn/multimodal_current.pt')
+        self.muscle_model.save('./nn/multimodal_current_muscle.pt')
 
         if self.max_return_epoch == self.num_evaluation:
-            self.model.save('../nn/multimodal_max.pt')
+            self.model.save('./nn/multimodal_max.pt')
             self.muscle_model.save('../nn/multimodal_max_muscle.pt')
             
         if self.num_evaluation % 100 == 0:
-            self.model.save(f'../nn/multimodal_{self.num_evaluation//100}.pt')
+            self.model.save(f'./nn/multimodal_{self.num_evaluation//100}.pt')
             self.muscle_model.save(f'../nn/multimodal_{self.num_evaluation//100}_muscle.pt')
 
     def LoadModel(self, path):
         """Load model from checkpoint"""
-        self.model.load('../nn/' + path + '.pt')
-        self.muscle_model.load('../nn/' + path + '_muscle.pt')
+        self.model.load('./nn/' + path + '.pt')
+        self.muscle_model.load('./nn/' + path + '_muscle.pt')
 
     def ComputeTDandGAE(self):
         """Compute TD targets and GAE advantages"""
