@@ -13,6 +13,8 @@ build-debug = { cmd = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug && ninja
 
 train = { cmd = "python python/main.py -d data/metadata.txt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb", OMP_NUM_THREADS = "8" } }
 
+train_multimodal = { cmd = "python python/main_multimodal.py --motion_list data/motion_list.txt --template data/metadata.txt --slaves 2", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb", OMP_NUM_THREADS = "8" } }
+
 # Training with performance monitoring
 train-profile = { cmd = "python -m cProfile -o profile.prof python/main.py -d data/metadata.txt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb" } }
 
