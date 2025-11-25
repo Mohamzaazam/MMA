@@ -1,0 +1,16 @@
+build/
+*.so
+*.a
+*.pyc
+*.pyo
+*.pyd
+*.lock
+runs/
+logs/
+
+nn/
+nn_base_run/
+dart/
+# pixi environments
+.pixi/*
+!.pixi/config.toml
