@@ -247,9 +247,10 @@ class CurriculumManager:
         self._update_unlocked_motions(epoch)
         
         # Check if we should update weights
-        if self.strategy != 'progressive' and epoch <= self.warmup_epochs:
-            # During warmup, use uniform weights (except for progressive)
-            return
+        if self.strategy != 'progressive':
+            if epoch <= self.warmup_epochs:
+                # During warmup, use uniform weights (except for progressive)
+                return
         
         if epoch % self.update_frequency == 0:
             self._update_weights()
