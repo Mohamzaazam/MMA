@@ -92,6 +92,22 @@ To view a pre-trained model (if you have one in `nn/` folder):
 
 *This module is an ongoing project.*
 
+📊 Monitoring & Profiling
+12. Profile Your Code
+Add profiling to find bottlenecks:
+
+bash
+# For Python side
+python -m cProfile -o profile.stats python/main.py -d data/metadata.txt
+
+# For C++ side, use perf
+perf record -g ./build/render data/metadata.txt
+perf report
+13. Monitor GPU Utilization
+bash
+watch -n 0.5 nvidia-smi
+If GPU utilization < 80%, increase batch sizes or parallelize more.
+
 ### Requirements
 - Maya
 - MotionBuilder
