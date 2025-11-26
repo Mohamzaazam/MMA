@@ -75,6 +75,7 @@ class BasePPO:
         self.clip_ratio = self.default_clip_ratio
         
         self.max_iteration = 50000
+        self.epoch = 0
         self.w_entropy = -0.001
 
         # Tracking variables
@@ -427,6 +428,8 @@ class BasePPO:
         """Run one training iteration (generate transitions + optimize)."""
         self.GenerateTransitions()
         self.OptimizeModel()
+
+        self.epoch += 1
 
     # =========================================================================
     # Evaluation and Logging

@@ -8,6 +8,7 @@ Key Strategies:
 1. Performance-based: Sample more from motions with lower rewards (harder motions)
 2. Progress-based: Sample more from motions showing improvement
 3. Balanced: Ensure all motions get minimum coverage
+4. Progressive: Gradually unlock motions over training (NEW)
 
 Usage:
     curriculum = CurriculumManager(motion_names, strategy='performance')
@@ -19,7 +20,7 @@ Usage:
 """
 
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from dataclasses import dataclass, field
 from collections import deque
 import json
@@ -103,6 +104,7 @@ class CurriculumManager:
         - 'progress': Higher weights for motions showing less improvement
         - 'balanced': Combination of performance + minimum coverage guarantee
         - 'ucb': Upper Confidence Bound - balance exploration vs exploitation
+        - 'progressive': Gradually unlock motions over training (NEW)
     """
     
     def __init__(self, 
@@ -112,18 +114,24 @@ class CurriculumManager:
                  max_weight: float = 3.0,
                  temperature: float = 1.0,
                  update_frequency: int = 10,
-                 warmup_epochs: int = 20):
+                 warmup_epochs: int = 1000,
+                 # Progressive strategy parameters
+                 epochs_per_motion: Union[int, List[int]] = 10000,
+                 progressive_order: Optional[List[str]] = None):
         """
         Initialize curriculum manager.
         
         Args:
             motion_names: List of motion names to track
-            strategy: Curriculum strategy ('uniform', 'performance', 'progress', 'balanced', 'ucb')
+            strategy: Curriculum strategy ('uniform', 'performance', 'progress', 
+                      'balanced', 'ucb', 'progressive')
             min_weight: Minimum weight for any motion (ensures coverage)
             max_weight: Maximum weight for any motion (prevents over-focusing)
             temperature: Controls how aggressive weight adjustments are (higher = more uniform)
             update_frequency: How often to update weights (in epochs)
             warmup_epochs: Number of epochs before starting curriculum (use uniform during warmup)
+            epochs_per_motion: (Progressive only) Epochs to train before adding next motion
+            progressive_order: (Progressive only) Order to unlock motions. If None, uses motion_names order
         """
         self.motion_names = motion_names
         self.strategy = strategy
@@ -132,6 +140,39 @@ class CurriculumManager:
         self.temperature = temperature
         self.update_frequency = update_frequency
         self.warmup_epochs = warmup_epochs
+        
+        # Progressive strategy parameters
+        self.progressive_order = progressive_order if progressive_order else list(motion_names)
+        
+        # Handle epochs_per_motion (int or list)
+        if isinstance(epochs_per_motion, int):
+            self.epochs_per_motion = [epochs_per_motion]
+        else:
+            self.epochs_per_motion = epochs_per_motion
+            
+        # Pre-calculate unlock epochs
+        self.unlock_schedule = [0]  # First motion unlocked at epoch 0
+        current_epoch = 0
+        
+        # We need to schedule unlocks for all motions except the first one (which is already unlocked)
+        # So we need len(self.progressive_order) - 1 intervals
+        num_intervals = len(self.progressive_order) - 1
+        
+        for i in range(num_intervals):
+            # Use specific interval if available, otherwise use the last one
+            if i < len(self.epochs_per_motion):
+                interval = self.epochs_per_motion[i]
+            else:
+                interval = self.epochs_per_motion[-1]
+            
+            current_epoch += interval
+            self.unlock_schedule.append(current_epoch)
+        
+        # Validate progressive_order contains valid motion names
+        if strategy == 'progressive':
+            for name in self.progressive_order:
+                if name not in motion_names:
+                    raise ValueError(f"Motion '{name}' in progressive_order not found in motion_names")
         
         # Initialize trackers
         self.trackers: Dict[str, MotionPerformanceTracker] = {
@@ -142,11 +183,49 @@ class CurriculumManager:
         # Current weights
         self.weights: Dict[str, float] = {name: 1.0 for name in motion_names}
         
+        # Progressive state: track which motions are unlocked
+        self.unlocked_motions: List[str] = []
+        if strategy == 'progressive' and self.progressive_order:
+            # Start with first motion unlocked
+            self.unlocked_motions = [self.progressive_order[0]]
+        
         # Tracking
-        self.epoch = 0
         self.weight_history: List[Dict[str, float]] = []
         
-    def update(self, motion_returns: Dict[str, List[float]], 
+    def _get_num_unlocked_motions(self, epoch: int) -> int:
+        """Calculate how many motions should be unlocked at current epoch."""
+        if self.strategy != 'progressive':
+            return len(self.motion_names)
+        
+        # Progressive: unlock based on pre-calculated schedule
+        # Find how many motions should be unlocked at this epoch
+        num_unlocked = 0
+        for unlock_epoch in self.unlock_schedule:
+            if epoch >= unlock_epoch:
+                num_unlocked += 1
+            else:
+                break
+                
+        return min(num_unlocked, len(self.progressive_order))
+    
+    def _update_unlocked_motions(self, epoch: int):
+        """Update the list of unlocked motions for progressive strategy."""
+        if self.strategy != 'progressive':
+            self.unlocked_motions = list(self.motion_names)
+            return
+        
+        num_to_unlock = self._get_num_unlocked_motions(epoch)
+        new_unlocked = self.progressive_order[:num_to_unlock]
+        
+        # Check if we're adding a new motion
+        if len(new_unlocked) > len(self.unlocked_motions):
+            newly_added = set(new_unlocked) - set(self.unlocked_motions)
+            for motion in newly_added:
+                print(f"\n*** PROGRESSIVE CURRICULUM: Unlocking motion '{motion}' at epoch {epoch} ***\n")
+        
+        self.unlocked_motions = new_unlocked
+        
+    def update(self, motion_returns: Dict[str, List[float]], epoch: int, 
                motion_steps: Optional[Dict[str, List[int]]] = None):
         """
         Update trackers with new episode data and potentially adjust weights.
@@ -155,20 +234,24 @@ class CurriculumManager:
             motion_returns: Dict mapping motion name to list of episode returns
             motion_steps: Optional dict mapping motion name to list of episode steps
         """
-        # Update trackers
+        # Update trackers (only for unlocked motions in progressive mode)
         for name, returns in motion_returns.items():
             if name in self.trackers and returns:
+                # In progressive mode, only update trackers for unlocked motions
+                if self.strategy == 'progressive' and name not in self.unlocked_motions:
+                    continue
                 steps = motion_steps.get(name) if motion_steps else None
                 self.trackers[name].update(returns, steps)
-        
-        self.epoch += 1
+
+        # Update unlocked motions for progressive strategy
+        self._update_unlocked_motions(epoch)
         
         # Check if we should update weights
-        if self.epoch <= self.warmup_epochs:
-            # During warmup, use uniform weights
+        if self.strategy != 'progressive' and epoch <= self.warmup_epochs:
+            # During warmup, use uniform weights (except for progressive)
             return
         
-        if self.epoch % self.update_frequency == 0:
+        if epoch % self.update_frequency == 0:
             self._update_weights()
     
     def _update_weights(self):
@@ -183,12 +266,17 @@ class CurriculumManager:
             weights = self._balanced_weights()
         elif self.strategy == 'ucb':
             weights = self._ucb_weights()
+        elif self.strategy == 'progressive':
+            weights = self._progressive_weights()
         else:
             raise ValueError(f"Unknown strategy: {self.strategy}")
         
-        # Apply min/max bounds
+        # Apply min/max bounds (only for unlocked motions)
         for name in weights:
-            weights[name] = np.clip(weights[name], self.min_weight, self.max_weight)
+            if self.strategy == 'progressive' and name not in self.unlocked_motions:
+                weights[name] = 0.0  # Locked motions get zero weight
+            else:
+                weights[name] = np.clip(weights[name], self.min_weight, self.max_weight)
         
         self.weights = weights
         self.weight_history.append(weights.copy())
@@ -196,6 +284,25 @@ class CurriculumManager:
     def _uniform_weights(self) -> Dict[str, float]:
         """Uniform weights - baseline"""
         return {name: 1.0 for name in self.motion_names}
+    
+    def _progressive_weights(self) -> Dict[str, float]:
+        """
+        Progressive weights: Only unlocked motions get weight.
+        
+        Within unlocked motions, uses uniform weighting by default.
+        Can be combined with performance-based weighting for unlocked motions.
+        """
+        weights = {}
+        
+        for name in self.motion_names:
+            if name in self.unlocked_motions:
+                # Unlocked motions get equal weight
+                weights[name] = 1.0
+            else:
+                # Locked motions get zero weight
+                weights[name] = 0.0
+        
+        return weights
     
     def _performance_weights(self) -> Dict[str, float]:
         """
@@ -299,6 +406,10 @@ class CurriculumManager:
         """Get current motion weights"""
         return self.weights.copy()
     
+    def get_unlocked_motions(self) -> List[str]:
+        """Get list of currently unlocked motions (for progressive strategy)"""
+        return self.unlocked_motions.copy()
+    
     def get_stats(self) -> Dict[str, Dict]:
         """Get detailed statistics for all motions"""
         stats = {}
@@ -309,22 +420,26 @@ class CurriculumManager:
                 'total_episodes': tracker.total_episodes,
                 'improvement': tracker.improvement,
                 'best_return': tracker.best_return,
-                'current_weight': self.weights.get(name, 1.0)
+                'current_weight': self.weights.get(name, 1.0),
+                'unlocked': name in self.unlocked_motions
             }
         return stats
     
-    def print_summary(self):
+    def print_summary(self, epoch: int):
         """Print curriculum summary"""
         print(f"\n{'='*60}")
-        print(f"Curriculum Summary (Epoch {self.epoch}, Strategy: {self.strategy})")
+        print(f"Curriculum Summary (Epoch {epoch}, Strategy: {self.strategy})")
+        if self.strategy == 'progressive':
+            print(f"Unlocked: {len(self.unlocked_motions)}/{len(self.motion_names)} motions")
         print(f"{'='*60}")
-        print(f"{'Motion':<20} {'AvgRet':>8} {'Episodes':>10} {'Weight':>8}")
+        print(f"{'Motion':<20} {'AvgRet':>8} {'Episodes':>10} {'Weight':>8} {'Status':>10}")
         print(f"{'-'*60}")
         
         for name in self.motion_names:
             tracker = self.trackers[name]
             weight = self.weights.get(name, 1.0)
-            print(f"{name:<20} {tracker.avg_return:>8.3f} {tracker.total_episodes:>10} {weight:>8.3f}")
+            status = "UNLOCKED" if name in self.unlocked_motions else "locked"
+            print(f"{name:<20} {tracker.avg_return:>8.3f} {tracker.total_episodes:>10} {weight:>8.3f} {status:>10}")
         
         print(f"{'='*60}\n")
     
@@ -341,6 +456,71 @@ class CurriculumManager:
 # =============================================================================
 # Testing utilities
 # =============================================================================
+
+def test_progressive_curriculum():
+    """Test progressive curriculum strategy"""
+    print("Testing Progressive CurriculumManager...")
+    
+    motion_names = ['walk', 'run', 'jump', 'dance']
+    
+    curriculum = CurriculumManager(
+        motion_names=motion_names,
+        strategy='progressive',
+        epochs_per_motion=100,  # Unlock new motion every 100 epochs
+        progressive_order=['walk', 'run', 'jump', 'dance']
+    )
+    
+    print(f"Initial unlocked motions: {curriculum.get_unlocked_motions()}")
+    assert curriculum.get_unlocked_motions() == ['walk'], "Should start with only 'walk'"
+    
+    # Simulate training
+    for epoch in range(450):
+        # Simulate returns only for unlocked motions
+        motion_returns = {}
+        for name in curriculum.get_unlocked_motions():
+            motion_returns[name] = [0.5 + np.random.randn() * 0.1 for _ in range(3)]
+        
+        curriculum.update(motion_returns, epoch)
+        
+        if epoch in [0, 99, 100, 199, 200, 299, 300]:
+            print(f"\nEpoch {epoch}:")
+            print(f"  Unlocked: {curriculum.get_unlocked_motions()}")
+            print(f"  Weights: {curriculum.get_weights()}")
+    
+    # Verify progressive unlocking
+    assert len(curriculum.get_unlocked_motions()) == 4, "All motions should be unlocked by epoch 450"
+    
+    curriculum.print_summary(epoch)
+    print("\n✓ Progressive curriculum test passed!")
+    
+    # Test with list of epochs
+    print("\nTesting Progressive Curriculum with list of epochs...")
+    curriculum = CurriculumManager(
+        motion_names=motion_names,
+        strategy='progressive',
+        epochs_per_motion=[100, 200],  # 100 for first gap, 200 for subsequent
+        progressive_order=['walk', 'run', 'jump', 'dance']
+    )
+    
+    # Check schedule
+    # walk: 0
+    # run: 100
+    # jump: 100 + 200 = 300
+    # dance: 300 + 200 = 500
+    expected_schedule = [0, 100, 300, 500]
+    print(f"Unlock schedule: {curriculum.unlock_schedule}")
+    assert curriculum.unlock_schedule == expected_schedule, f"Expected {expected_schedule}, got {curriculum.unlock_schedule}"
+    
+    assert curriculum._get_num_unlocked_motions(0) == 1
+    assert curriculum._get_num_unlocked_motions(99) == 1
+    assert curriculum._get_num_unlocked_motions(100) == 2
+    assert curriculum._get_num_unlocked_motions(299) == 2
+    assert curriculum._get_num_unlocked_motions(300) == 3
+    assert curriculum._get_num_unlocked_motions(499) == 3
+    assert curriculum._get_num_unlocked_motions(500) == 4
+    
+    print("✓ Progressive curriculum (list) test passed!")
+
 
 def test_curriculum_manager():
     """Test curriculum manager with synthetic data"""
@@ -368,13 +548,13 @@ def test_curriculum_manager():
                 'jump': [0.3 + np.random.randn() * 0.2 for _ in range(3)],  # Hard
             }
             
-            curriculum.update(motion_returns)
+            curriculum.update(motion_returns, epoch)
             
             if epoch % 5 == 0:
                 weights = curriculum.get_weights()
                 print(f"Epoch {epoch}: weights = {weights}")
         
-        curriculum.print_summary()
+        curriculum.print_summary(epoch)
         
         # Verify weights
         weights = curriculum.get_weights()
@@ -391,3 +571,5 @@ def test_curriculum_manager():
 
 if __name__ == "__main__":
     test_curriculum_manager()
+    print("\n" + "="*60 + "\n")
+    test_progressive_curriculum()

@@ -1,19 +1,28 @@
 """
-main_multimodal.py - Multimodal Motion Training for MASS
+main_multimodal.py - Multimodal Motion Training for MASS with Curriculum Learning
 
-This script extends the original PPO training to support multiple motion clips.
-It uses the MultimodalEnvManager to train a single policy that can imitate
-multiple different motions (walking, running, etc.).
+This script extends the original PPO training to support multiple motion clips
+with adaptive curriculum learning that adjusts motion sampling weights based
+on training performance.
 
-Key differences from main.py:
+Key features:
 1. Uses MultimodalEnvManager instead of single pymss instance
 2. Tracks per-motion statistics during training
-3. Supports motion weighting for curriculum learning
+3. Supports curriculum learning for motion weighting
 4. Logs per-motion performance to TensorBoard
+5. Progressive curriculum: gradually unlock motions over training
 
 Usage:
+    # Basic usage with balanced curriculum
     python main_multimodal.py --motion_list data/motion_list.txt --template data/metadata.txt
-    python main_multimodal.py --motion_list data/motion_list.txt --template data/metadata.txt -m checkpoint
+    
+    # Progressive curriculum: train on one motion, then add more
+    python main_multimodal.py --motion_list data/motion_list.txt --template data/metadata.txt \\
+        --curriculum progressive --epochs_per_motion 1000
+    
+    # Progressive with custom order
+    python main_multimodal.py --motion_list data/motion_list.txt --template data/metadata.txt \\
+        --curriculum progressive --epochs_per_motion 500 --progressive_order walk run jump
 """
 
 import argparse
@@ -21,6 +30,7 @@ import os
 import time
 import numpy as np
 from datetime import datetime
+from typing import Optional, List, Union
 
 import torch
 import torch.optim as optim
@@ -36,30 +46,50 @@ from utils import (
     generate_shuffle_indices, format_time
 )
 from multimodal_env import MultimodalEnvManager, MotionConfig, load_motion_configs_from_list
+from curriculum_manager import CurriculumManager
 
 print(f"Using device: {device}")
 
 
 class MultimodalPPO(BasePPO):
     """
-    PPO trainer for multimodal motion imitation.
+    PPO trainer for multimodal motion imitation with curriculum learning.
     
-    Extends BasePPO to support training on multiple motions with per-motion tracking.
+    Extends BasePPO to support training on multiple motions with per-motion tracking
+    and adaptive curriculum learning.
     """
     
     def __init__(self, motion_list_path: str, metadata_template_path: str,
-                 num_slaves_per_motion: int = 4):
+                 num_slaves_per_motion: int = 4,
+                 curriculum_strategy: str = 'progressive',
+                 curriculum_warmup: int = 20,
+                 curriculum_update_freq: int = 5,
+                 epochs_per_motion: Union[int, List[int]] = 1000,
+                 progressive_order: Optional[List[str]] = None):
         """
-        Initialize multimodal PPO trainer.
+        Initialize multimodal PPO trainer with curriculum learning.
         
         Args:
             motion_list_path: Path to motion_list.txt
             metadata_template_path: Path to template metadata file
             num_slaves_per_motion: Number of parallel environments per motion
+            curriculum_strategy: Strategy for curriculum learning 
+                ('uniform', 'performance', 'progress', 'balanced', 'ucb', 'progressive')
+            curriculum_warmup: Number of epochs before starting curriculum
+            curriculum_update_freq: How often to update curriculum weights
+            epochs_per_motion: (Progressive only) Epochs before unlocking next motion
+            progressive_order: (Progressive only) Order to unlock motions
         """
         super().__init__()
         
         np.random.seed(seed=int(time.time()))
+        
+        # Store curriculum parameters
+        self.curriculum_strategy = curriculum_strategy
+        self.curriculum_warmup = curriculum_warmup
+        self.curriculum_update_freq = curriculum_update_freq
+        self.epochs_per_motion = epochs_per_motion if epochs_per_motion is not None else 1000
+        self.progressive_order = progressive_order
         
         # Load motion configurations
         print("Loading motion configurations...")
@@ -127,12 +157,40 @@ class MultimodalPPO(BasePPO):
         self.motion_returns = {config.name: [] for config in self.motion_configs}
         self.motion_episode_counts = {config.name: 0 for config in self.motion_configs}
         
+        # =====================================================================
+        # CURRICULUM LEARNING INTEGRATION
+        # =====================================================================
+        motion_names = [config.name for config in self.motion_configs]
+        
+        # Use provided progressive_order or default to motion_names order
+        prog_order = progressive_order if progressive_order else motion_names
+        
+        self.curriculum = CurriculumManager(
+            motion_names=motion_names,
+            strategy=curriculum_strategy,
+            warmup_epochs=curriculum_warmup,
+            update_frequency=curriculum_update_freq,
+            min_weight=0.5,
+            max_weight=1.0,
+            temperature=1.0,
+            epochs_per_motion=epochs_per_motion,
+            progressive_order=prog_order
+        )
+        print(f"\nCurriculum Learning:")
+        print(f"  Strategy: {curriculum_strategy}")
+        print(f"  Warmup epochs: {curriculum_warmup}")
+        print(f"  Update frequency: {curriculum_update_freq}")
+        if curriculum_strategy == 'progressive':
+            print(f"  Epochs per motion: {epochs_per_motion}")
+            print(f"  Progressive order: {prog_order}")
+        # =====================================================================
+        
         # Reset environments
         self.env.Resets(True)
         
         # Initialize TensorBoard with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._init_tensorboard(f'./runs/multimodal_{timestamp}')
+        self._init_tensorboard(f'./runs/multimodal_{curriculum_strategy}_{timestamp}')
 
     def SaveModel(self):
         """Save models with multimodal prefix."""
@@ -278,11 +336,31 @@ class MultimodalPPO(BasePPO):
 
             states = self.env.GetStates()
 
+    def _update_curriculum(self):
+        """
+        Update curriculum manager with current epoch's performance data.
+        
+        This is called at the end of each evaluation to:
+        1. Feed per-motion returns to the curriculum manager
+        2. Get updated weights
+        3. Apply weights to the environment (for future sampling)
+        """
+        # Update curriculum with this epoch's motion returns
+        self.curriculum.update(self.motion_returns, self.epoch)
+        
+        # Get updated weights from curriculum
+        new_weights = self.curriculum.get_weights()
+        
+        # Apply weights to environment manager
+        self.env.set_motion_weights(new_weights)
+        
+        return new_weights
+
     def Evaluate(self):
         """
-        Evaluate and log training progress with per-motion statistics.
+        Evaluate and log training progress with per-motion statistics and curriculum.
         
-        Overrides base to add per-motion logging.
+        Overrides base to add per-motion logging and curriculum updates.
         """
         self.num_evaluation += 1
 
@@ -321,6 +399,27 @@ class MultimodalPPO(BasePPO):
                 count = self.motion_episode_counts[name]
                 print(f'||  {name}: avg_return={avg:.3f}, episodes={count}')
 
+        # =====================================================================
+        # CURRICULUM LEARNING UPDATE
+        # =====================================================================
+        curriculum_weights = self._update_curriculum()
+        
+        # Print curriculum info
+        print('||--- Curriculum Weights ---')
+        for name, weight in curriculum_weights.items():
+            status = ""
+            if self.curriculum_strategy == 'progressive':
+                if name in self.curriculum.get_unlocked_motions():
+                    status = " [UNLOCKED]"
+                else:
+                    status = " [locked]"
+            print(f'||  {name}: weight={weight:.3f}{status}')
+        
+        if self.curriculum_strategy == 'progressive':
+            unlocked = self.curriculum.get_unlocked_motions()
+            print(f'||  Progress: {len(unlocked)}/{self.num_motions} motions unlocked')
+        # =====================================================================
+
         self.rewards.append(avg_return)
 
         # Log to TensorBoard
@@ -340,6 +439,18 @@ class MultimodalPPO(BasePPO):
                     self.writer.add_scalar(f'PerMotion/{name}_AvgReturn', np.mean(returns), self.num_evaluation)
                     self.writer.add_scalar(f'PerMotion/{name}_Episodes', self.motion_episode_counts[name], self.num_evaluation)
 
+            # =====================================================================
+            # LOG CURRICULUM WEIGHTS TO TENSORBOARD
+            # =====================================================================
+            for name, weight in curriculum_weights.items():
+                self.writer.add_scalar(f'Curriculum/{name}_Weight', weight, self.num_evaluation)
+            
+            # Log progressive curriculum progress
+            if self.curriculum_strategy == 'progressive':
+                num_unlocked = len(self.curriculum.get_unlocked_motions())
+                self.writer.add_scalar('Curriculum/NumUnlockedMotions', num_unlocked, self.num_evaluation)
+            # =====================================================================
+
         self.SaveModel()
 
         print('=' * 45)
@@ -347,19 +458,39 @@ class MultimodalPPO(BasePPO):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Multimodal Motion Training for MASS')
+    parser = argparse.ArgumentParser(description='Multimodal Motion Training for MASS with Curriculum Learning')
     parser.add_argument('-m', '--model', help='Model checkpoint to resume from')
     parser.add_argument('--motion_list', required=True, help='Path to motion_list.txt')
     parser.add_argument('--template', required=True, help='Path to template metadata file')
-    parser.add_argument('--slaves', type=int, default=2, help='Slaves per motion (default: 2)')
+    parser.add_argument('--slaves', type=int, default=6, help='Slaves per motion (default: 2)')
+    
+    # Curriculum learning arguments
+    parser.add_argument('--curriculum', type=str, default='progressive',
+                        choices=['uniform', 'performance', 'progress', 'balanced', 'ucb', 'progressive'],
+                        help='Curriculum strategy (default: balanced)')
+    parser.add_argument('--warmup', type=int, default=1000,
+                        help='Warmup epochs before curriculum starts (default: 1000)')
+    parser.add_argument('--update_freq', type=int, default=20,
+                        help='Curriculum weight update frequency (default: 20)')
+    
+    # Progressive curriculum arguments
+    parser.add_argument('--epochs_per_motion', type=int, nargs='+', default=[1000, 4000, 5000],
+                        help='(Progressive only) Epochs before unlocking next motion (default: 1000)')
+    parser.add_argument('--progressive_order', type=str, nargs='+', default=['walk', 'walk_fullbody', 'balance', 'run', 'dance', 'kick'],
+                        help='(Progressive only) Order to unlock motions, e.g., --progressive_order walk run jump')
 
     args = parser.parse_args()
 
-    # Create multimodal PPO trainer
+    # Create multimodal PPO trainer with curriculum
     ppo = MultimodalPPO(
         motion_list_path=args.motion_list,
         metadata_template_path=args.template,
-        num_slaves_per_motion=args.slaves
+        num_slaves_per_motion=args.slaves,
+        curriculum_strategy=args.curriculum,
+        curriculum_warmup=args.warmup,
+        curriculum_update_freq=args.update_freq,
+        epochs_per_motion=args.epochs_per_motion,
+        progressive_order=args.progressive_order
     )
 
     # Create nn directory
@@ -374,7 +505,12 @@ def main():
         ppo.SaveModel()
 
     print(f'\nNum states: {ppo.env.GetNumState()}, num actions: {ppo.env.GetNumAction()}')
-    print(f'Starting multimodal training with {ppo.num_motions} motions...\n')
+    print(f'Starting multimodal training with {ppo.num_motions} motions...')
+    print(f'Curriculum strategy: {args.curriculum}')
+    if args.curriculum == 'progressive':
+        print(f'Progressive mode: unlock new motion every {args.epochs_per_motion} epochs')
+        print(f'Starting with: {ppo.curriculum.get_unlocked_motions()}')
+    print('')
 
     # Training loop
     for i in range(ppo.max_iteration - 5):
