@@ -77,7 +77,7 @@ Then open your browser and navigate to `http://localhost:6006` to view the train
 To view a pre-trained model (if you have one in `nn/` folder):
 
 ```bash
-./build/render data/metadata.txt nn/your_model.pt nn/your_muscle_model.pt
+./build/render data/metadata.txt ./nn/your_model.pt ./nn/your_muscle_model.pt
 ```
 
 ## Project Structure
