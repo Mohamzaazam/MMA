@@ -1,21 +1,19 @@
 """
-main_multimodal.py - Multimodal Motion Training for MASS (IMPROVED)
+main_multimodal.py - Multimodal Motion Training for MASS
 
-This script extends the original PPO training to support multiple motion clips
-with ADAPTIVE CURRICULUM LEARNING.
+This script extends the original PPO training to support multiple motion clips.
+It uses the MultimodalEnvManager to train a single policy that can imitate
+multiple different motions (walking, running, etc.).
 
-Key improvements over original:
-1. Integrated CurriculumManager for adaptive motion weighting
-2. Better per-motion statistics tracking
-3. Configurable curriculum strategies
-4. Improved logging and monitoring
+Key differences from main.py:
+1. Uses MultimodalEnvManager instead of single pymss instance
+2. Tracks per-motion statistics during training
+3. Supports motion weighting for curriculum learning
+4. Logs per-motion performance to TensorBoard
 
 Usage:
-    # Basic multimodal training with curriculum
+    # Basic multimodal training
     python main_multimodal.py --motion_list data/motion_list.txt --template data/metadata.txt
-    
-    # With specific curriculum strategy
-    python main_multimodal.py --motion_list data/motion_list.txt --template data/metadata.txt --curriculum balanced
     
     # Resume from checkpoint
     python main_multimodal.py --motion_list data/motion_list.txt --template data/metadata.txt -m checkpoint
@@ -39,17 +37,13 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import torchvision.transforms as T
-from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
-
-torch.backends.cudnn.benchmark = True  # Auto-tune cuDNN kernels
 
 import numpy as np
 
 # Import MASS modules
 from Model import SimulationNN, MuscleNN, Tensor
 from multimodal_env import MultimodalEnvManager, MotionConfig, load_motion_configs_from_list
-from curriculum_manager import CurriculumManager
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -66,14 +60,25 @@ class EpisodeBuffer:
         self.data.append(Episode(*args))
         
     def Pop(self):
-        if self.data:
-            self.data.pop()
+        self.data.pop()
         
     def GetData(self):
         return self.data
-    
+
+
+MuscleTransition = namedtuple('MuscleTransition', ('JtA', 'tau_des', 'L', 'b'))
+
+
+class MuscleBuffer:
+    def __init__(self, buff_size=10000):
+        super(MuscleBuffer, self).__init__()
+        self.buffer = deque(maxlen=buff_size)
+
+    def Push(self, *args):
+        self.buffer.append(MuscleTransition(*args))
+
     def Clear(self):
-        self.data = []
+        self.buffer.clear()
 
 
 Transition = namedtuple('Transition', ('s', 'a', 'logprob', 'TD', 'GAE'))
@@ -91,58 +96,15 @@ class ReplayBuffer:
         self.buffer.clear()
 
 
-# Dataset classes for DataLoader (for faster training)
-class TransitionDataset(Dataset):
-    def __init__(self, transitions):
-        self.transitions = transitions
-        
-    def __len__(self):
-        return len(self.transitions)
-    
-    def __getitem__(self, idx):
-        transition = self.transitions[idx]
-        return {
-            's': transition.s.astype(np.float32),
-            'a': transition.a.astype(np.float32),
-            'logprob': np.float32(transition.logprob),
-            'TD': np.float32(transition.TD),
-            'GAE': np.float32(transition.GAE)
-        }
-
-
-class MuscleDataset(Dataset):
-    def __init__(self, JtA, tau_des, L, b, num_action, num_muscles):
-        self.JtA = JtA
-        self.tau_des = tau_des
-        self.L = L
-        self.b = b
-        self.num_action = num_action
-        self.num_muscles = num_muscles
-        
-    def __len__(self):
-        return len(self.JtA)
-    
-    def __getitem__(self, idx):
-        return {
-            'JtA': self.JtA[idx].astype(np.float32),
-            'tau_des': self.tau_des[idx].astype(np.float32),
-            'L': self.L[idx].astype(np.float32).reshape(self.num_action, self.num_muscles),
-            'b': self.b[idx].astype(np.float32)
-        }
-
-
 class MultimodalPPO:
     """
-    PPO trainer for multimodal motion imitation with curriculum learning.
+    PPO trainer for multimodal motion imitation.
+    
+    Extends the original PPO class to support training on multiple motions.
     """
     
-    def __init__(self, 
-                 motion_list_path: str, 
-                 metadata_template_path: str, 
-                 num_slaves_per_motion: int = 4,
-                 curriculum_strategy: str = 'balanced',
-                 curriculum_warmup: int = 20,
-                 curriculum_update_freq: int = 5):
+    def __init__(self, motion_list_path: str, metadata_template_path: str, 
+                 num_slaves_per_motion: int = 4):
         """
         Initialize multimodal PPO trainer.
         
@@ -150,10 +112,6 @@ class MultimodalPPO:
             motion_list_path: Path to motion_list.txt
             metadata_template_path: Path to template metadata file
             num_slaves_per_motion: Number of parallel environments per motion
-            curriculum_strategy: Strategy for curriculum learning 
-                                 ('uniform', 'performance', 'progress', 'balanced', 'ucb')
-            curriculum_warmup: Number of epochs before starting curriculum
-            curriculum_update_freq: How often to update curriculum weights
         """
         np.random.seed(seed=int(time.time()))
         
@@ -196,27 +154,6 @@ class MultimodalPPO:
         print(f"  Num state: {self.num_state}")
         print(f"  Num action: {self.num_action}")
         print(f"  Use muscle: {self.use_muscle}")
-
-        # =====================================================================
-        # CURRICULUM LEARNING SETUP
-        # =====================================================================
-        self.curriculum_strategy = curriculum_strategy
-        motion_names = [c.name for c in self.motion_configs]
-        
-        self.curriculum = CurriculumManager(
-            motion_names=motion_names,
-            strategy=curriculum_strategy,
-            min_weight=0.1,
-            max_weight=3.0,
-            temperature=1.0,
-            update_frequency=curriculum_update_freq,
-            warmup_epochs=curriculum_warmup
-        )
-        
-        print(f"\nCurriculum Learning:")
-        print(f"  Strategy: {curriculum_strategy}")
-        print(f"  Warmup epochs: {curriculum_warmup}")
-        print(f"  Update frequency: {curriculum_update_freq}")
 
         # Training hyperparameters
         self.num_epochs = 10
@@ -267,36 +204,39 @@ class MultimodalPPO:
         self.max_return_epoch = 1
         self.tic = time.time()
         
-        # Per-motion tracking (for this batch)
-        self.motion_returns_this_batch: Dict[str, List[float]] = {}
+        # Per-motion tracking
+        self.motion_returns = {config.name: [] for config in self.motion_configs}
+        self.motion_episode_counts = {config.name: 0 for config in self.motion_configs}
 
         # Episode buffers
-        self.episodes = [EpisodeBuffer() for _ in range(self.num_slaves)]
+        self.episodes = [None] * self.num_slaves
+        for j in range(self.num_slaves):
+            self.episodes[j] = EpisodeBuffer()
         self.env.Resets(True)
 
         # TensorBoard logging
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.writer = SummaryWriter(f'runs/multimodal_{curriculum_strategy}_{timestamp}')
+        self.writer = SummaryWriter(f'runs/multimodal_{timestamp}')
 
     def SaveModel(self):
         """Save current and best models"""
-        os.makedirs('nn', exist_ok=True)
+        os.makedirs('./nn', exist_ok=True)
         
-        self.model.save('nn/multimodal_current.pt')
-        self.muscle_model.save('nn/multimodal_current_muscle.pt')
+        self.model.save('./nn/multimodal_current.pt')
+        self.muscle_model.save('./nn/multimodal_current_muscle.pt')
 
         if self.max_return_epoch == self.num_evaluation:
-            self.model.save('nn/multimodal_max.pt')
-            self.muscle_model.save('nn/multimodal_max_muscle.pt')
+            self.model.save('./nn/multimodal_max.pt')
+            self.muscle_model.save('./nn/multimodal_max_muscle.pt')
             
         if self.num_evaluation % 100 == 0:
-            self.model.save(f'nn/multimodal_{self.num_evaluation//100}.pt')
-            self.muscle_model.save(f'nn/multimodal_{self.num_evaluation//100}_muscle.pt')
+            self.model.save(f'./nn/multimodal_{self.num_evaluation//100}.pt')
+            self.muscle_model.save(f'../nn/multimodal_{self.num_evaluation//100}_muscle.pt')
 
     def LoadModel(self, path):
         """Load model from checkpoint"""
-        self.model.load('nn/' + path + '.pt')
-        self.muscle_model.load('nn/' + path + '_muscle.pt')
+        self.model.load('../nn/' + path + '.pt')
+        self.muscle_model.load('../nn/' + path + '_muscle.pt')
 
     def ComputeTDandGAE(self):
         """Compute TD targets and GAE advantages"""
@@ -304,8 +244,8 @@ class MultimodalPPO:
         self.muscle_buffer = {}
         self.sum_return = 0.0
         
-        # Reset per-motion tracking for this batch
-        self.motion_returns_this_batch = {c.name: [] for c in self.motion_configs}
+        # Reset per-motion tracking for this evaluation
+        motion_returns_this_epoch = {name: [] for name in self.motion_returns}
         
         for epi in self.total_episodes:
             data = epi.GetData()
@@ -329,13 +269,17 @@ class MultimodalPPO:
             TD = values[:size] + advantages
             
             # Track per-motion returns
-            # motion_indices[0] is the slave_id, use it to get motion name
-            slave_id = motion_indices[0]
-            motion_name = self.env.get_motion_for_slave(slave_id)
-            self.motion_returns_this_batch[motion_name].append(epi_return)
+            motion_name = self.motion_configs[motion_indices[0] // self.num_slaves_per_motion].name
+            motion_returns_this_epoch[motion_name].append(epi_return)
+            self.motion_episode_counts[motion_name] += 1
 
             for i in range(size):
                 self.replay_buffer.Push(states[i], actions[i], logprobs[i], TD[i], advantages[i])
+                
+        # Store motion returns for logging
+        for name, returns in motion_returns_this_epoch.items():
+            if returns:
+                self.motion_returns[name] = returns
                 
         self.num_episode = len(self.total_episodes)
         self.num_tuple = len(self.replay_buffer.buffer)
@@ -351,19 +295,14 @@ class MultimodalPPO:
         
         if self.muscle_buffer['JtA'].size > 0:
             print(f"Muscle tuples shape: {self.muscle_buffer['JtA'].shape}")
-        
-        # =====================================================================
-        # UPDATE CURRICULUM
-        # =====================================================================
-        self.curriculum.update(self.motion_returns_this_batch)
-        
-        # Apply new weights to environment
-        new_weights = self.curriculum.get_weights()
-        self.env.set_motion_weights(new_weights)
 
     def GenerateTransitions(self):
         """Generate transitions by running the policy"""
         self.total_episodes = []
+        states = [None] * self.num_slaves
+        actions = [None] * self.num_slaves
+        rewards = [None] * self.num_slaves
+        
         states = self.env.GetStates()
         local_step = 0
         counter = 0
@@ -399,18 +338,16 @@ class MultimodalPPO:
                     nan_occur = True
                 elif self.env.IsEndOfEpisode(j) is False:
                     terminated_state = False
-                    rewards_j = self.env.GetReward(j)
-                    # Store slave_id as motion_idx for later identification
-                    self.episodes[j].Push(states[j], actions[j], rewards_j, values[j], logprobs[j], j)
+                    rewards[j] = self.env.GetReward(j)
+                    # Include motion index in episode data
+                    motion_idx = j  # Will be used to determine which motion this episode is from
+                    self.episodes[j].Push(states[j], actions[j], rewards[j], values[j], logprobs[j], motion_idx)
                     local_step += 1
 
                 if terminated_state or nan_occur:
-                    if nan_occur and self.episodes[j].data:
+                    if nan_occur:
                         self.episodes[j].Pop()
-                    
-                    if self.episodes[j].data:  # Only add non-empty episodes
-                        self.total_episodes.append(self.episodes[j])
-                    
+                    self.total_episodes.append(self.episodes[j])
                     self.episodes[j] = EpisodeBuffer()
                     self.env.Reset(True, j)
 
@@ -420,26 +357,21 @@ class MultimodalPPO:
             states = self.env.GetStates()
 
     def OptimizeSimulationNN(self):
-        """Optimize the policy and value networks using DataLoader"""
-        all_transitions = list(self.replay_buffer.buffer)
-        dataset = TransitionDataset(all_transitions)
+        """Optimize the policy and value networks"""
+        all_transitions = np.array(self.replay_buffer.buffer, dtype=object)
         
         for j in range(self.num_epochs):
-            dataloader = DataLoader(
-                dataset,
-                batch_size=self.batch_size,
-                shuffle=True,
-                num_workers=0,
-                pin_memory=True,
-                drop_last=False
-            )
+            np.random.shuffle(all_transitions)
             
-            for batch in dataloader:
-                stack_s = batch['s']
-                stack_a = batch['a']
-                stack_lp = batch['logprob']
-                stack_td = batch['TD']
-                stack_gae = batch['GAE']
+            for i in range(len(all_transitions) // self.batch_size):
+                transitions = all_transitions[i * self.batch_size:(i + 1) * self.batch_size]
+                batch = Transition(*zip(*transitions))
+
+                stack_s = np.vstack(batch.s).astype(np.float32)
+                stack_a = np.vstack(batch.a).astype(np.float32)
+                stack_lp = np.vstack(batch.logprob).astype(np.float32)
+                stack_td = np.vstack(batch.TD).astype(np.float32)
+                stack_gae = np.vstack(batch.GAE).astype(np.float32)
 
                 a_dist, v = self.model(Tensor(stack_s))
                 
@@ -448,11 +380,10 @@ class MultimodalPPO:
 
                 # Actor loss
                 ratio = torch.exp(a_dist.log_prob(Tensor(stack_a)) - Tensor(stack_lp))
-                stack_gae_np = stack_gae.numpy()
-                stack_gae_np = (stack_gae_np - stack_gae_np.mean()) / (stack_gae_np.std() + 1E-5)
-                stack_gae_t = Tensor(stack_gae_np)
-                surrogate1 = ratio * stack_gae_t
-                surrogate2 = torch.clamp(ratio, min=1.0 - self.clip_ratio, max=1.0 + self.clip_ratio) * stack_gae_t
+                stack_gae = (stack_gae - stack_gae.mean()) / (stack_gae.std() + 1E-5)
+                stack_gae = Tensor(stack_gae)
+                surrogate1 = ratio * stack_gae
+                surrogate2 = torch.clamp(ratio, min=1.0 - self.clip_ratio, max=1.0 + self.clip_ratio) * stack_gae
                 loss_actor = -torch.min(surrogate1, surrogate2).mean()
                 
                 # Entropy loss
@@ -464,7 +395,7 @@ class MultimodalPPO:
                 loss = loss_actor + loss_entropy + loss_critic
 
                 self.optimizer.zero_grad()
-                loss.backward()
+                loss.backward(retain_graph=True)
                 for param in self.model.parameters():
                     if param.grad is not None:
                         param.grad.data.clamp_(-0.5, 0.5)
@@ -473,35 +404,41 @@ class MultimodalPPO:
             print(f'Optimizing sim nn : {j + 1}/{self.num_epochs}', end='\r')
         print('')
 
+    def generate_shuffle_indices(self, batch_size, minibatch_size):
+        """Generate shuffled indices for minibatch training"""
+        n = batch_size
+        m = minibatch_size
+        p = np.random.permutation(n)
+
+        r = m - n % m
+        if r > 0:
+            p = np.hstack([p, np.random.randint(0, n, r)])
+
+        p = p.reshape(-1, m)
+        return p
+
     def OptimizeMuscleNN(self):
-        """Optimize the muscle network using DataLoader"""
+        """Optimize the muscle network"""
         if self.muscle_buffer['JtA'].size == 0:
             return
-        
-        dataset = MuscleDataset(
-            self.muscle_buffer['JtA'],
-            self.muscle_buffer['TauDes'],
-            self.muscle_buffer['L'],
-            self.muscle_buffer['b'],
-            self.num_action,
-            self.num_muscles
-        )
             
         for j in range(self.num_epochs_muscle):
-            dataloader = DataLoader(
-                dataset,
-                batch_size=self.muscle_batch_size,
-                shuffle=True,
-                num_workers=0,
-                pin_memory=True,
-                drop_last=False
+            minibatches = self.generate_shuffle_indices(
+                self.muscle_buffer['JtA'].shape[0], 
+                self.muscle_batch_size
             )
-            
-            for batch in dataloader:
-                stack_JtA = Tensor(batch['JtA'])
-                stack_tau_des = Tensor(batch['tau_des'])
-                stack_L = Tensor(batch['L'])
-                stack_b = Tensor(batch['b'])
+
+            for minibatch in minibatches:
+                stack_JtA = self.muscle_buffer['JtA'][minibatch].astype(np.float32)
+                stack_tau_des = self.muscle_buffer['TauDes'][minibatch].astype(np.float32)
+                stack_L = self.muscle_buffer['L'][minibatch].astype(np.float32)
+                stack_L = stack_L.reshape(self.muscle_batch_size, self.num_action, self.num_muscles)
+                stack_b = self.muscle_buffer['b'][minibatch].astype(np.float32)
+
+                stack_JtA = Tensor(stack_JtA)
+                stack_tau_des = Tensor(stack_tau_des)
+                stack_L = Tensor(stack_L)
+                stack_b = Tensor(stack_b)
 
                 activation = self.muscle_model(stack_JtA, stack_tau_des)
                 tau = torch.einsum('ijk,ik->ij', (stack_L, activation)) + stack_b
@@ -512,7 +449,7 @@ class MultimodalPPO:
                 loss = 0.01 * loss_reg + loss_target
 
                 self.optimizer_muscle.zero_grad()
-                loss.backward()
+                loss.backward(retain_graph=True)
                 for param in self.muscle_model.parameters():
                     if param.grad is not None:
                         param.grad.data.clamp_(-0.5, 0.5)
@@ -556,7 +493,6 @@ class MultimodalPPO:
 
         # Print overall stats
         print(f'# {self.num_evaluation} === {h}h:{m}m:{s}s ===')
-        print(f'||Curriculum Strategy       : {self.curriculum_strategy}')
         print(f'||Loss Actor               : {self.loss_actor:.4f}')
         print(f'||Loss Critic              : {self.loss_critic:.4f}')
         print(f'||Loss Muscle              : {self.loss_muscle:.4f}')
@@ -569,14 +505,13 @@ class MultimodalPPO:
         print(f'||Avg Step per episode     : {self.num_tuple / self.num_episode:.1f}')
         print(f'||Max Avg Return So far    : {self.max_return:.3f} at #{self.max_return_epoch}')
         
-        # Print per-motion stats with curriculum weights
-        print('||--- Per-Motion Statistics (with curriculum weights) ---')
-        curriculum_stats = self.curriculum.get_stats()
-        for name, stats in curriculum_stats.items():
-            weight = stats['current_weight']
-            avg_ret = stats['avg_return']
-            total_eps = stats['total_episodes']
-            print(f'||  {name}: avg_ret={avg_ret:.3f}, total_eps={total_eps}, weight={weight:.3f}')
+        # Print per-motion stats
+        print('||--- Per-Motion Statistics ---')
+        for name, returns in self.motion_returns.items():
+            if returns:
+                avg = np.mean(returns)
+                count = self.motion_episode_counts[name]
+                print(f'||  {name}: avg_return={avg:.3f}, episodes={count}')
 
         self.rewards.append(avg_return)
 
@@ -590,31 +525,24 @@ class MultimodalPPO:
         self.writer.add_scalar('Train/AvgStep', self.num_tuple / self.num_episode, self.num_evaluation)
         self.writer.add_scalar('Train/MaxAvgReturn', self.max_return, self.num_evaluation)
         
-        # Log per-motion returns and weights
-        for name, stats in curriculum_stats.items():
-            self.writer.add_scalar(f'PerMotion/{name}_AvgReturn', stats['avg_return'], self.num_evaluation)
-            self.writer.add_scalar(f'PerMotion/{name}_Episodes', stats['total_episodes'], self.num_evaluation)
-            self.writer.add_scalar(f'Curriculum/{name}_Weight', stats['current_weight'], self.num_evaluation)
+        # Log per-motion returns
+        for name, returns in self.motion_returns.items():
+            if returns:
+                self.writer.add_scalar(f'PerMotion/{name}_AvgReturn', np.mean(returns), self.num_evaluation)
+                self.writer.add_scalar(f'PerMotion/{name}_Episodes', self.motion_episode_counts[name], self.num_evaluation)
 
         self.SaveModel()
 
-        print('=' * 60)
+        print('=' * 45)
         return np.array(self.rewards)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Multimodal Motion Training for MASS with Curriculum Learning')
+    parser = argparse.ArgumentParser(description='Multimodal Motion Training for MASS')
     parser.add_argument('-m', '--model', help='Model checkpoint to resume from')
     parser.add_argument('--motion_list', required=True, help='Path to motion_list.txt')
     parser.add_argument('--template', required=True, help='Path to template metadata file')
-    parser.add_argument('--slaves', type=int, default=4, help='Slaves per motion (default: 4)')
-    parser.add_argument('--curriculum', type=str, default='balanced', 
-                        choices=['uniform', 'performance', 'progress', 'balanced', 'ucb'],
-                        help='Curriculum learning strategy (default: balanced)')
-    parser.add_argument('--warmup', type=int, default=20, 
-                        help='Curriculum warmup epochs (default: 20)')
-    parser.add_argument('--update_freq', type=int, default=5,
-                        help='Curriculum weight update frequency (default: 5)')
+    parser.add_argument('--slaves', type=int, default=2, help='Slaves per motion (default: 4)')
     
     args = parser.parse_args()
     
@@ -622,14 +550,11 @@ def main():
     ppo = MultimodalPPO(
         motion_list_path=args.motion_list,
         metadata_template_path=args.template,
-        num_slaves_per_motion=args.slaves,
-        curriculum_strategy=args.curriculum,
-        curriculum_warmup=args.warmup,
-        curriculum_update_freq=args.update_freq
+        num_slaves_per_motion=args.slaves
     )
     
     # Create nn directory
-    nn_dir = 'nn'
+    nn_dir = './nn'
     if not os.path.exists(nn_dir):
         os.makedirs(nn_dir)
         
@@ -640,8 +565,7 @@ def main():
         ppo.SaveModel()
         
     print(f'\nNum states: {ppo.env.GetNumState()}, num actions: {ppo.env.GetNumAction()}')
-    print(f'Starting multimodal training with {ppo.num_motions} motions...')
-    print(f'Curriculum strategy: {args.curriculum}\n')
+    print(f'Starting multimodal training with {ppo.num_motions} motions...\n')
     
     # Training loop
     for i in range(ppo.max_iteration - 5):

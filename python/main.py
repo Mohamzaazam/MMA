@@ -15,10 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import torchvision.transforms as T
-from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
-
-torch.backends.cudnn.benchmark = True  # Auto-tune cuDNN kernels
 
 import numpy as np
 import pymss
@@ -68,46 +65,6 @@ class ReplayBuffer(object):
 
 	def Clear(self):
 		self.buffer.clear()
-
-# Dataset classes for DataLoader
-class TransitionDataset(Dataset):
-	def __init__(self, transitions):
-		self.transitions = transitions
-		
-	def __len__(self):
-		return len(self.transitions)
-	
-	def __getitem__(self, idx):
-		transition = self.transitions[idx]
-		return {
-			's': transition.s.astype(np.float32),
-			'a': transition.a.astype(np.float32),
-			'logprob': np.float32(transition.logprob),
-			'TD': np.float32(transition.TD),
-			'GAE': np.float32(transition.GAE)
-		}
-
-class MuscleDataset(Dataset):
-	def __init__(self, JtA, tau_des, L, b, num_action, num_muscles):
-		self.JtA = JtA
-		self.tau_des = tau_des
-		self.L = L
-		self.b = b
-		self.num_action = num_action
-		self.num_muscles = num_muscles
-		
-	def __len__(self):
-		return len(self.JtA)
-	
-	def __getitem__(self, idx):
-		return {
-			'JtA': self.JtA[idx].astype(np.float32),
-			'tau_des': self.tau_des[idx].astype(np.float32),
-			'L': self.L[idx].astype(np.float32).reshape(self.num_action, self.num_muscles),
-			'b': self.b[idx].astype(np.float32)
-		}
-
-
 class PPO(object):
 	def __init__(self,meta_file):
 		np.random.seed(seed = int(time.time()))
@@ -178,8 +135,8 @@ class PPO(object):
 			self.muscle_model.save('../nn/'+str(self.num_evaluation//100)+'_muscle.pt')
 
 	def LoadModel(self,path):
-		self.model.load('../nn/'+path+'.pt')
-		self.muscle_model.load('../nn/'+path+'_muscle.pt')
+		self.model.load('../nn/'+path+'.pt', weights_only=True)
+		self.muscle_model.load('../nn/'+path+'_muscle.pt', weights_only=True)
 
 	def ComputeTDandGAE(self):
 		self.replay_buffer.Clear()
@@ -276,59 +233,46 @@ class PPO(object):
 			states = self.env.GetStates()
 		
 	def OptimizeSimulationNN(self):
-		# Create dataset and dataloader
-		all_transitions = list(self.replay_buffer.buffer)
-		dataset = TransitionDataset(all_transitions)
-		
+		all_transitions = np.array(self.replay_buffer.buffer, dtype=object)
 		for j in range(self.num_epochs):
-			# Create DataLoader with shuffle and pinned memory
-			dataloader = DataLoader(
-				dataset, 
-				batch_size=self.batch_size, 
-				shuffle=True,
-				num_workers=0,
-				pin_memory=True,
-				drop_last=False
-			)
-			
-			for batch in dataloader:
-				# Data is already on correct dtype from Dataset
-				stack_s = batch['s']
-				stack_a = batch['a']
-				stack_lp = batch['logprob']
-				stack_td = batch['TD']
-				stack_gae = batch['GAE']
-				
+			np.random.shuffle(all_transitions)
+			for i in range(len(all_transitions)//self.batch_size):
+				transitions = all_transitions[i*self.batch_size:(i+1)*self.batch_size]
+				batch = Transition(*zip(*transitions))
 
+				stack_s = np.vstack(batch.s).astype(np.float32)
+				stack_a = np.vstack(batch.a).astype(np.float32)
+				stack_lp = np.vstack(batch.logprob).astype(np.float32)
+				stack_td = np.vstack(batch.TD).astype(np.float32)
+				stack_gae = np.vstack(batch.GAE).astype(np.float32)
+				
 				a_dist,v = self.model(Tensor(stack_s))
 				'''Critic Loss'''
 				loss_critic = ((v-Tensor(stack_td)).pow(2)).mean()
 				
 				'''Actor Loss'''
 				ratio = torch.exp(a_dist.log_prob(Tensor(stack_a))-Tensor(stack_lp))
-				stack_gae_np = stack_gae.cpu().numpy()
-				stack_gae_np = (stack_gae_np-stack_gae_np.mean())/(stack_gae_np.std()+ 1E-5)
-				stack_gae_t = Tensor(stack_gae_np)
-				surrogate1 = ratio * stack_gae_t
-				surrogate2 = torch.clamp(ratio,min =1.0-self.clip_ratio,max=1.0+self.clip_ratio) * stack_gae_t
+				stack_gae = (stack_gae-stack_gae.mean())/(stack_gae.std()+ 1E-5)
+				stack_gae = Tensor(stack_gae)
+				surrogate1 = ratio * stack_gae
+				surrogate2 = torch.clamp(ratio,min =1.0-self.clip_ratio,max=1.0+self.clip_ratio) * stack_gae
 				loss_actor = - torch.min(surrogate1,surrogate2).mean()
 				'''Entropy Loss'''
 				loss_entropy = - self.w_entropy * a_dist.entropy().mean()
-				
-				loss = loss_actor + loss_entropy + loss_critic
 
 				self.loss_actor = loss_actor.cpu().detach().numpy().tolist()
 				self.loss_critic = loss_critic.cpu().detach().numpy().tolist()
+				
+				loss = loss_actor + loss_entropy + loss_critic
 
 				self.optimizer.zero_grad()
-				loss.backward()
+				loss.backward(retain_graph=True)
 				for param in self.model.parameters():
 					if param.grad is not None:
 						param.grad.data.clamp_(-0.5,0.5)
 				self.optimizer.step()
 			print('Optimizing sim nn : {}/{}'.format(j+1,self.num_epochs),end='\r')
 		print('')
-
 
 	def generate_shuffle_indices(self, batch_size, minibatch_size):
 		n = batch_size
@@ -343,32 +287,20 @@ class PPO(object):
 		return p
 
 	def OptimizeMuscleNN(self):
-		# Create dataset and dataloader
-		dataset = MuscleDataset(
-			self.muscle_buffer['JtA'],
-			self.muscle_buffer['TauDes'],
-			self.muscle_buffer['L'],
-			self.muscle_buffer['b'],
-			self.num_action,
-			self.num_muscles
-		)
-		
 		for j in range(self.num_epochs_muscle):
-			# Create DataLoader with shuffle and pinned memory
-			dataloader = DataLoader(
-				dataset,
-				batch_size=self.muscle_batch_size,
-				shuffle=True,
-				num_workers=0,
-				pin_memory=True,
-				drop_last=False
-			)
-			
-			for batch in dataloader:
-				stack_JtA = Tensor(batch['JtA'])
-				stack_tau_des = Tensor(batch['tau_des'])
-				stack_L = Tensor(batch['L'])
-				stack_b = Tensor(batch['b'])
+			minibatches = self.generate_shuffle_indices(self.muscle_buffer['JtA'].shape[0],self.muscle_batch_size)
+
+			for minibatch in minibatches:
+				stack_JtA = self.muscle_buffer['JtA'][minibatch].astype(np.float32)
+				stack_tau_des =  self.muscle_buffer['TauDes'][minibatch].astype(np.float32)
+				stack_L = self.muscle_buffer['L'][minibatch].astype(np.float32)
+				stack_L = stack_L.reshape(self.muscle_batch_size,self.num_action,self.num_muscles)
+				stack_b = self.muscle_buffer['b'][minibatch].astype(np.float32)
+
+				stack_JtA = Tensor(stack_JtA)
+				stack_tau_des = Tensor(stack_tau_des)
+				stack_L = Tensor(stack_L)
+				stack_b = Tensor(stack_b)
 
 				activation = self.muscle_model(stack_JtA,stack_tau_des)
 				tau = torch.einsum('ijk,ik->ij',(stack_L,activation)) + stack_b
@@ -377,9 +309,10 @@ class PPO(object):
 				loss_target = (((tau-stack_tau_des)/100.0).pow(2)).mean()
 
 				loss = 0.01*loss_reg + loss_target
+				# loss = loss_target
 
 				self.optimizer_muscle.zero_grad()
-				loss.backward()
+				loss.backward(retain_graph=True)
 				for param in self.muscle_model.parameters():
 					if param.grad is not None:
 						param.grad.data.clamp_(-0.5,0.5)
