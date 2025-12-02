@@ -114,7 +114,7 @@
         <Body type="Box" mass="2.0" size="0.0793 0.0728 0.0652" contact="Off" color="0.6 0.6 1.5 1.0" obj="Neck.obj">
             <Transformation linear="1.0 0.0 0.0 0.0 0.9732 -0.2301 0.0 0.2301 0.9732 " translation="0.0 1.5297 -0.0250 "/>
         </Body>
-        <Joint type="Ball" bvh="lowerneck" lower="-0.4 -0.4 -0.4 " upper="0.6 0.6 1.5 ">
+        <Joint type="Ball" bvh="upperneck" lower="-0.4 -0.4 -0.4 " upper="0.6 0.6 1.5 ">
             <Transformation linear="1.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0" translation="0. 1.4844 -0.0436 "/>
         </Joint>
     </Node>
