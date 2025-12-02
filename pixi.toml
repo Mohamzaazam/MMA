@@ -21,7 +21,7 @@ test_multimodal = { cmd = "./build/render data/metadata_29_01.txt ./nn/multimoda
 train-profile = { cmd = "python -m cProfile -o profile.prof python/main.py -d data/metadata.txt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb" } }
 
 tensorboard = "tensorboard --logdir=runs --host 0.0.0.0 --port 6006"
-render = { cmd = "./build/render data/metadata_walk.txt", env = { PYTHONHOME = "$CONDA_PREFIX" } }
+render = { cmd = "./build/render data/metadata_29_01.txt", env = { PYTHONHOME = "$CONDA_PREFIX" } }
 
 # Clean build directory
 clean = "rm -rf build"
