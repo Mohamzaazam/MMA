@@ -26,6 +26,9 @@ render = { cmd = "./build/render data/metadata_16_01.txt", env = { PYTHONHOME = 
 # Clean build directory
 clean = "rm -rf build"
 
+# AMC to BVH conversion
+convert = "python -m python.amc2bvh.main"
+
 [dependencies]
 eigen = ">=3.4.0,<4"
 dartsim-cpp = ">=6.16.0,<7"
