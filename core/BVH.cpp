@@ -38,7 +38,7 @@ Eigen::Matrix3d R_z(double z)
 }
 BVHNode::
 BVHNode(const std::string& name,BVHNode* parent)
-	:mParent(parent),mName(name),mChannelOffset(0),mNumChannels(0)
+	:mParent(parent),mName(name),mChannelOffset(0),mNumChannels(0),mAxis(Eigen::Vector3d::Zero())
 {
 
 }
@@ -55,23 +55,45 @@ void
 BVHNode::
 Set(const Eigen::VectorXd& m_t)
 {
-	mR.setIdentity();
+	// mR.setIdentity();
 	
-	for(int i=0;i<mNumChannels;i++)
-	{
-		switch(mChannel[i])
-		{
-		case Xpos:break;
-		case Ypos:break;
-		case Zpos:break;
-		case Xrot:mR = mR*R_x(m_t[mChannelOffset+i]);break;
-		case Yrot:mR = mR*R_y(m_t[mChannelOffset+i]);break;
-		case Zrot:mR = mR*R_z(m_t[mChannelOffset+i]);break;
-		default:break;
-		}
-	}
+	// for(int i=0;i<mNumChannels;i++)
+	// {
+	// 	switch(mChannel[i])
+	// 	{
+	// 	case Xpos:break;
+	// 	case Ypos:break;
+	// 	case Zpos:break;
+	// 	case Xrot:mR = mR*R_x(m_t[mChannelOffset+i]);break;
+	// 	case Yrot:mR = mR*R_y(m_t[mChannelOffset+i]);break;
+	// 	case Zrot:mR = mR*R_z(m_t[mChannelOffset+i]);break;
+	// 	default:break;
+	// 	}
+	// }
+	SetWithAxis(m_t,mAxis);
 
 }
+void BVHNode::SetWithAxis(const Eigen::VectorXd& m_t, const Eigen::Vector3d& axis_deg)
+{
+	// Build rotation from channels
+    Eigen::Matrix3d R_motion = Eigen::Matrix3d::Identity();
+    for(int i=0; i<mNumChannels; i++) {
+        switch(mChannel[i]) {
+            case Xrot: R_motion = R_motion * R_x(m_t[mChannelOffset+i]); break;
+            case Yrot: R_motion = R_motion * R_y(m_t[mChannelOffset+i]); break;
+            case Zrot: R_motion = R_motion * R_z(m_t[mChannelOffset+i]); break;
+            default: break;
+        }
+    }
+    
+    // Build axis rotation
+    Eigen::Matrix3d R_axis = R_x(axis_deg[0]) * R_y(axis_deg[1]) * R_z(axis_deg[2]);
+    
+    // IMPORTANT: Apply inverse axis to "undo" the converter's axis rotation
+    // since the motion data was transformed by the converter
+    mR = R_axis.transpose() * R_motion;
+}
+
 void
 BVHNode::
 Set(const Eigen::Matrix3d& R_t)

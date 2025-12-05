@@ -97,7 +97,7 @@ Examples:
     
     # walk-bvh preset
     if args.walk_bvh:
-        config.scale = 2.54
+        config.scale = (1 / 0.45) * 2.54
         config.collapse_joints = ConversionConfig.walk_bvh_collapse_joints()
         config.skip_joints = ConversionConfig.walk_bvh_skip_joints()
         config.end_joints = ConversionConfig.walk_bvh_end_joints()

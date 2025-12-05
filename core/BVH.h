@@ -37,11 +37,16 @@ public:
 
 	void AddChild(BVHNode* child);
 	BVHNode* GetNode(const std::string& name);
+
+	void SetAxis(const Eigen::Vector3d& axis){mAxis = axis;}
+	const Eigen::Vector3d& GetAxis(){return mAxis;}
+	void SetWithAxis(const Eigen::VectorXd& m_t, const Eigen::Vector3d& axis_deg);
 private:
 	BVHNode* mParent;
 	std::vector<BVHNode*> mChildren;
 
 	Eigen::Matrix3d mR;
+	Eigen::Vector3d mAxis;
 	std::string mName;
 
 	int mChannelOffset;
