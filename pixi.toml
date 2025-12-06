@@ -28,6 +28,7 @@ clean = "rm -rf build"
 
 # AMC to BVH conversion
 standalone = "python -m python.amc2bvh.standalone"
+truncate = "python -m python.amc2bvh.truncate_mocap"
 
 [dependencies]
 eigen = ">=3.4.0,<4"
