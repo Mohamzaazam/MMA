@@ -8,7 +8,9 @@ complete joint hierarchy, axes, and degrees of freedom.
 import numpy as np
 
 from .data_structs import Joint, Skeleton
-from .quat_math import QuaternionMath
+from .transformations import quaternion_from_euler
+from .rot_converter import asf_order_to_axes
+
 
 
 class ASFParser:
@@ -115,7 +117,8 @@ class ASFParser:
                 # Convert to quaternion matching C's parse_joint_rotation()
                 # C converts degrees to radians, then uses euler_to_quat
                 axis_rad = np.radians(axis_angles)
-                current_joint.rotation = QuaternionMath.euler_to_quat(axis_rad, current_joint.axis_order)
+                axes = asf_order_to_axes(current_joint.axis_order)
+                current_joint.rotation = quaternion_from_euler(*axis_rad, axes=axes)
             elif parts[0] == 'dof':
                 current_joint.dof = [d.upper() for d in parts[1:]]
         

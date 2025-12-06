@@ -10,7 +10,27 @@ from typing import List
 
 from .data_structs import Joint
 from .config import RotationOrder
-from .quat_math import QuaternionMath
+from .transformations import (
+    quaternion_from_euler,
+    quaternion_multiply,
+    quaternion_inverse,
+    euler_from_quaternion,
+)
+
+
+def asf_order_to_axes(order: str) -> str:
+    """
+    Convert ASF axis order (e.g., "XYZ") to transformations.py axes format (e.g., "sxyz").
+    
+    The 's' prefix indicates static/extrinsic rotations (fixed frame of reference).
+    
+    Args:
+        order: ASF-style axis order like "XYZ", "ZXY", etc.
+        
+    Returns:
+        transformations.py-style axes string like "sxyz", "szxy", etc.
+    """
+    return 's' + order.lower()
 
 
 class RotationConverter:
@@ -38,33 +58,40 @@ class RotationConverter:
         """
         # Build input rotation from DOF channels
         # Match C's sample_rotation construction (lines 439-447)
-        input_order = ""
-        input_angles = []
+        # Build a full XYZ rotation with zeros for missing axes
+        xyz_angles = [0.0, 0.0, 0.0]  # X, Y, Z
+        has_rotation = False
         
         for i, dof in enumerate(joint.dof):
-            if dof in ['RX', 'RY', 'RZ']:
-                input_order += dof[1]  # Extract 'X', 'Y', or 'Z'
-                input_angles.append(data[i] if i < len(data) else 0.0)
+            if dof == 'RX':
+                xyz_angles[0] = data[i] if i < len(data) else 0.0
+                has_rotation = True
+            elif dof == 'RY':
+                xyz_angles[1] = data[i] if i < len(data) else 0.0
+                has_rotation = True
+            elif dof == 'RZ':
+                xyz_angles[2] = data[i] if i < len(data) else 0.0
+                has_rotation = True
         
-        if not input_order:
+        if not has_rotation:
             # No rotation DOF
             return [0.0, 0.0, 0.0]
         
-        # Convert motion angles to quaternion
-        # Note: data should already be in radians from AMC parser
-        q_motion = QuaternionMath.euler_to_quat(np.array(input_angles), input_order)
+        # Convert motion angles to quaternion using transformations.py
+        # Always use XYZ order with all 3 angles
+        q_motion = quaternion_from_euler(xyz_angles[0], xyz_angles[1], xyz_angles[2], axes='sxyz')
         
         # Apply joint local transform (C lines 450-453):
         # q_combined = q_axis * q_motion * q_axis_inv
         q_axis = joint.rotation  # Pre-computed quaternion from ASF axis
-        q_axis_inv = QuaternionMath.quat_inverse(q_axis)
+        q_axis_inv = quaternion_inverse(q_axis)
         
-        q_combined = QuaternionMath.quat_multiply(q_axis, q_motion)
-        q_combined = QuaternionMath.quat_multiply(q_combined, q_axis_inv)
+        q_combined = quaternion_multiply(q_axis, q_motion)
+        q_combined = quaternion_multiply(q_combined, q_axis_inv)
         
-        # Convert to XYZ Euler angles (C's quat_to_euler_xyz)
-        # Returns [roll, pitch, yaw] which are [X, Y, Z] rotations
-        result = QuaternionMath.quat_to_euler_xyz(q_combined)
+        # Convert to XYZ Euler angles
+        # euler_from_quaternion returns angles in the specified axis order
+        result = euler_from_quaternion(q_combined, axes='sxyz')
         
         # Convert to degrees
         result_deg = np.degrees(result)

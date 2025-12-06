@@ -11,7 +11,7 @@ This converter produces BVH files that match the walk_.bvh skeleton structure:
 
 from .data_structs import Joint, Skeleton, MotionFrame, Motion
 from .config import RotationOrder, ConversionConfig
-from .quat_math import QuaternionMath
+from . import quat_math
 from .rot_converter import RotationConverter
 from .skel_converter import SkeletonConverter
 from .asf_parser import ASFParser
@@ -33,8 +33,8 @@ __all__ = [
     'RotationOrder',
     'ConversionConfig',
     
-    # Math utilities
-    'QuaternionMath',
+    # Math utilities module
+    'quat_math',
     
     # Converters
     'RotationConverter',
