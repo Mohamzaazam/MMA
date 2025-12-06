@@ -59,6 +59,7 @@ xorg-libxmu = "*"
 xorg-libxi = "*"
 tensorboard = ">=2.20.0,<3"
 snakeviz = ">=2.2.2,<3"
+scipy = ">=1.16.3,<2"
 
 [pypi-dependencies]
 torch = { version = "==2.5.1", index = "https://download.pytorch.org/whl/cu124" }

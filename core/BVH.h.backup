@@ -11,12 +11,6 @@
  
 namespace MASS
 {
-
-// CMU axis compensation functions
-void InitializeCMUAxisCompensation();
-Eigen::Matrix3d ApplyCMUCompensation(const std::string& bvhJointName, const Eigen::Matrix3d& R_bvh);
-void SetCMUCompensation(bool enable);
-
 Eigen::Matrix3d R_x(double x);
 Eigen::Matrix3d R_y(double y);
 Eigen::Matrix3d R_z(double z);
