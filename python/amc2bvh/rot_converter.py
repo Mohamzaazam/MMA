@@ -1,20 +1,8 @@
 """
 Rotation conversion utilities for ASF/AMC to BVH conversion.
 
-FIXED VERSION: Corrected axis rotation handling for CMU ASF files.
-
-CHANGE LOG:
------------
-- Fixed: Changed from similarity transform (q_axis * q_motion * q_axis_inv)
-  to simple composition (R_axis * R_motion)
-  
-- The ASF "axis" defines the local DOF coordinate frame orientation.
-- Rotations in AMC are in this local frame.
-- BVH expects rotations in the parent frame.
-- Solution: R_global = R_axis * R_local_motion
-
-This fixes the "crossed legs" issue when using converted BVH files
-in simulation pipelines that expect standard BVH conventions.
+Handles conversion of rotation data between different formats and
+coordinate systems used in ASF and BVH files.
 """
 
 import numpy as np
@@ -22,6 +10,7 @@ from typing import List
 
 from .data_structs import Joint
 from .config import RotationOrder
+from .quat_math import QuaternionMath
 
 
 class RotationConverter:
@@ -34,20 +23,21 @@ class RotationConverter:
         """
         Convert rotation from ASF format to BVH format.
         
-        CORRECTED ALGORITHM:
-        1. Build rotation matrix from AMC channel data in DOF order
-        2. Build axis rotation matrix from ASF axis field  
-        3. Compose: R_global = R_axis * R_motion
-        4. Convert to ZYX Euler angles for BVH output
+        Matches C's write_bvh_joint_sample() (lines 438-458):
+        1. Build sample_rotation from channel data
+        2. Apply: q_combined = q_axis * q_motion * q_axis_inv  
+        3. Convert to XYZ Euler angles
+        4. Output as degrees in reverse order (Z, Y, X for BVH)
         
         Args:
-            joint: Joint containing axis rotation and DOF info
+            joint: Joint containing rotation quaternion and DOF
             data: Motion data array for the joint (already in radians)
             
         Returns:
             List of 3 rotation values in degrees [Zrot, Yrot, Xrot]
         """
         # Build input rotation from DOF channels
+        # Match C's sample_rotation construction (lines 439-447)
         input_order = ""
         input_angles = []
         
@@ -60,106 +50,28 @@ class RotationConverter:
             # No rotation DOF
             return [0.0, 0.0, 0.0]
         
-        # Build rotation matrix from motion data
-        # Note: input_angles are already in radians from AMC parser
-        R_motion = self._euler_to_matrix(np.array(input_angles), input_order)
+        # Convert motion angles to quaternion
+        # Note: data should already be in radians from AMC parser
+        q_motion = QuaternionMath.euler_to_quat(np.array(input_angles), input_order)
         
-        # Build axis rotation matrix from ASF axis field
-        # joint.axis is stored in degrees, axis_order is typically "XYZ"
-        axis_angles_rad = np.radians(joint.axis)
-        R_axis = self._euler_to_matrix(axis_angles_rad, joint.axis_order)
+        # Apply joint local transform (C lines 450-453):
+        # q_combined = q_axis * q_motion * q_axis_inv
+        q_axis = joint.rotation  # Pre-computed quaternion from ASF axis
+        q_axis_inv = QuaternionMath.quat_inverse(q_axis)
         
-        # FIXED: Use composition instead of similarity transform
-        # The motion is defined in the local axis frame, so we compose
-        # with the axis rotation to get the parent-relative rotation
-        #
-        # WRONG: R_axis @ R_motion @ R_axis.T (similarity transform)
-        # RIGHT: R_axis @ R_motion (composition)
-        R_combined = R_axis @ R_motion
+        q_combined = QuaternionMath.quat_multiply(q_axis, q_motion)
+        q_combined = QuaternionMath.quat_multiply(q_combined, q_axis_inv)
         
-        # Convert to ZYX Euler angles for BVH output
-        result_deg = self._matrix_to_euler_zyx(R_combined)
+        # Convert to XYZ Euler angles (C's quat_to_euler_xyz)
+        # Returns [roll, pitch, yaw] which are [X, Y, Z] rotations
+        result = QuaternionMath.quat_to_euler_xyz(q_combined)
         
-        # Return in ZYX order for BVH (matches "Zrotation Yrotation Xrotation")
-        return [result_deg[0], result_deg[1], result_deg[2]]
-    
-    def _euler_to_matrix(self, angles_rad: np.ndarray, order: str) -> np.ndarray:
-        """
-        Convert Euler angles (radians) to rotation matrix.
+        # Convert to degrees
+        result_deg = np.degrees(result)
         
-        Applies rotations in the order specified using intrinsic (local axis)
-        convention, which matches ASF and standard animation conventions.
-        
-        Args:
-            angles_rad: Array of angles in radians
-            order: String specifying rotation order, e.g., "XYZ"
-            
-        Returns:
-            3x3 rotation matrix
-        """
-        R = np.eye(3)
-        
-        for i, axis in enumerate(order):
-            if i >= len(angles_rad):
-                break
-            
-            c, s = np.cos(angles_rad[i]), np.sin(angles_rad[i])
-            
-            if axis == 'X':
-                Ri = np.array([
-                    [1, 0,  0],
-                    [0, c, -s],
-                    [0, s,  c]
-                ])
-            elif axis == 'Y':
-                Ri = np.array([
-                    [ c, 0, s],
-                    [ 0, 1, 0],
-                    [-s, 0, c]
-                ])
-            else:  # Z
-                Ri = np.array([
-                    [c, -s, 0],
-                    [s,  c, 0],
-                    [0,  0, 1]
-                ])
-            
-            # Intrinsic rotation: post-multiply
-            R = R @ Ri
-        
-        return R
-    
-    def _matrix_to_euler_zyx(self, R: np.ndarray) -> np.ndarray:
-        """
-        Extract ZYX Euler angles (degrees) from rotation matrix.
-        
-        For BVH output with "Zrotation Yrotation Xrotation" channel order.
-        
-        The ZYX decomposition is: R = Rz * Ry * Rx
-        
-        Args:
-            R: 3x3 rotation matrix
-            
-        Returns:
-            Array [Z, Y, X] angles in degrees
-        """
-        # ZYX decomposition
-        # sin(Y) = -R[2,0]
-        sy = np.clip(-R[2, 0], -1.0, 1.0)
-        cy = np.sqrt(max(0, 1 - sy*sy))
-        
-        if cy > 1e-6:
-            # Normal case
-            z = np.arctan2(R[1, 0], R[0, 0])
-            y = np.arcsin(sy)
-            x = np.arctan2(R[2, 1], R[2, 2])
-        else:
-            # Gimbal lock: Y = ±90°
-            z = np.arctan2(-R[0, 1], R[1, 1])
-            y = np.pi / 2 * np.sign(sy)
-            x = 0.0
-        
-        return np.degrees(np.array([z, y, x]))
+        # Return in ZYX order for BVH output (C lines 456-458)
+        # C outputs: angles[2], angles[1], angles[0] which is Z, Y, X
+        return [result_deg[2], result_deg[1], result_deg[0]]
     
     @staticmethod
     def degrees_to_radians(angles: np.ndarray) -> np.ndarray:
