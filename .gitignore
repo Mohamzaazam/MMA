@@ -5,6 +5,7 @@ build/
 *.pyo
 *.pyd
 *.lock
+*.Identifier
 runs/
 logs/
 
