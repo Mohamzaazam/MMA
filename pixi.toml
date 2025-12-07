@@ -6,10 +6,11 @@ version = "0.1.0"
 
 [tasks]
 # Standard Release build (recommended - safe optimizations only)
-build = { cmd = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build -j4" }
+# Note: env overrides ensure we use MMA's pixi environment, not the old MASS one
+build = { cmd = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build -j4", env = { PKG_CONFIG_PATH = "$CONDA_PREFIX/lib/pkgconfig:$CONDA_PREFIX/share/pkgconfig", CMAKE_PREFIX_PATH = "$CONDA_PREFIX" } }
 
 # Debug build for development (slower but with debug symbols)
-build-debug = { cmd = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug && ninja -C build -j4" }
+build-debug = { cmd = "cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug && ninja -C build -j4", env = { PKG_CONFIG_PATH = "$CONDA_PREFIX/lib/pkgconfig:$CONDA_PREFIX/share/pkgconfig", CMAKE_PREFIX_PATH = "$CONDA_PREFIX" } }
 
 train = { cmd = "python python/main.py -d data/metadata.txt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb", OMP_NUM_THREADS = "8" } }
 test = { cmd = "./build/render data/metadata_balance.txt ./nn/max.pt ./nn/max_muscle.pt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb", OMP_NUM_THREADS = "8" } }
@@ -60,6 +61,9 @@ xorg-libxi = "*"
 tensorboard = ">=2.20.0,<3"
 snakeviz = ">=2.2.2,<3"
 scipy = ">=1.16.3,<2"
+libgomp = ">=15.2.0,<16"
+libglx = ">=1.7.0,<2"
+libglvnd = ">=1.7.0,<2"
 
 [pypi-dependencies]
 torch = { version = "==2.5.1", index = "https://download.pytorch.org/whl/cu124" }
