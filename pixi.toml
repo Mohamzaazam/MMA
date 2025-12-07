@@ -16,13 +16,13 @@ train = { cmd = "python python/main.py -d data/metadata.txt", env = { PYTHONPATH
 test = { cmd = "./build/render data/metadata_balance.txt ./nn/max.pt ./nn/max_muscle.pt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb", OMP_NUM_THREADS = "8" } }
 
 train_multimodal = { cmd = "python python/main_multimodal.py --motion_list data/motion_list.txt --template data/metadata.txt --slaves 6", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb", OMP_NUM_THREADS = "8" } }
-test_multimodal = { cmd = "./build/render data/metadata_16_01.txt ./nn/multimodal_max.pt ./nn/multimodal_max_muscle.pt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb", OMP_NUM_THREADS = "8" } }
+test_multimodal = { cmd = "./build/render data/metadata_29_01.txt ./nn/multimodal_max.pt ./nn/multimodal_max_muscle.pt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb", OMP_NUM_THREADS = "8" } }
 
 # Training with performance monitoring
 train-profile = { cmd = "python -m cProfile -o profile.prof python/main.py -d data/metadata.txt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb" } }
 
 tensorboard = "tensorboard --logdir=runs --host 0.0.0.0 --port 6006"
-render = { cmd = "./build/render data/metadata_16_01.txt", env = { PYTHONHOME = "$CONDA_PREFIX" } }
+render = { cmd = "./build/render data/metadata_29_01.txt", env = { PYTHONHOME = "$CONDA_PREFIX" } }
 
 # Clean build directory
 clean = "rm -rf build"

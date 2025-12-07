@@ -3,108 +3,8 @@
 #include <Eigen/Geometry>
 #include "dart/dart.hpp"
 using namespace dart::dynamics;
-
 namespace MASS
 {
-
-// ============================================================================
-// CMU ASF Axis Compensation
-// ============================================================================
-// CMU ASF skeletons have joint "axis" rotations that define the local
-// coordinate system. The BVH converter outputs R_axis * R_motion * R_axis^(-1),
-// but human.xml expects R_motion (without axis transformation).
-// 
-// To compensate, we apply: R_joint = R_axis^(-1) * R_bvh * R_axis
-// This extracts the original R_motion from the BVH data.
-// ============================================================================
-
-// Enable CMU axis compensation (set to false for original walk_.bvh files)
-static bool g_enableCMUCompensation = true;
-
-// CMU axis rotation matrices (from ASF "axis" field, converted to rotation matrices)
-// These are R_axis values that need to be compensated
-static std::map<std::string, Eigen::Matrix3d> g_cmuAxisRotations;
-
-void InitializeCMUAxisCompensation()
-{
-    // Only initialize once
-    static bool initialized = false;
-    if (initialized) return;
-    initialized = true;
-    
-    // Convert CMU axis angles (in degrees) to rotation matrices
-    // CMU uses XYZ Euler order for axis
-    auto eulerXYZToMatrix = [](double rx, double ry, double rz) -> Eigen::Matrix3d {
-        double rx_rad = rx * M_PI / 180.0;
-        double ry_rad = ry * M_PI / 180.0;
-        double rz_rad = rz * M_PI / 180.0;
-        
-        Eigen::Matrix3d Rx, Ry, Rz;
-        Rx << 1, 0, 0,
-              0, cos(rx_rad), -sin(rx_rad),
-              0, sin(rx_rad), cos(rx_rad);
-        Ry << cos(ry_rad), 0, sin(ry_rad),
-              0, 1, 0,
-              -sin(ry_rad), 0, cos(ry_rad);
-        Rz << cos(rz_rad), -sin(rz_rad), 0,
-              sin(rz_rad), cos(rz_rad), 0,
-              0, 0, 1;
-        
-        // XYZ extrinsic = ZYX intrinsic
-        return Rz * Ry * Rx;
-    };
-    
-    // CMU joint axes (from standard CMU ASF file)
-    // Only leg joints have significant axis rotations
-    g_cmuAxisRotations["Character1_RightUpLeg"] = eulerXYZToMatrix(0, 0, -20);
-    g_cmuAxisRotations["Character1_LeftUpLeg"] = eulerXYZToMatrix(0, 0, 20);
-    g_cmuAxisRotations["Character1_RightLeg"] = eulerXYZToMatrix(0, 0, -20);
-    g_cmuAxisRotations["Character1_LeftLeg"] = eulerXYZToMatrix(0, 0, 20);
-    g_cmuAxisRotations["Character1_RightFoot"] = eulerXYZToMatrix(-90, 0, -20);
-    g_cmuAxisRotations["Character1_LeftFoot"] = eulerXYZToMatrix(-90, 0, 20);
-    
-    std::cout << "CMU axis compensation initialized for leg joints" << std::endl;
-}
-
-// Apply CMU axis compensation to a rotation matrix
-Eigen::Matrix3d ApplyCMUCompensation(const std::string& bvhJointName, const Eigen::Matrix3d& R_bvh)
-{
-    if (!g_enableCMUCompensation)
-        return R_bvh;
-    
-    auto it = g_cmuAxisRotations.find(bvhJointName);
-    if (it == g_cmuAxisRotations.end())
-        return R_bvh;  // No compensation needed for this joint
-    
-    // BVH contains: R_bvh = R_axis * R_motion * R_axis^(-1)
-    // We want: R_motion
-    // So: R_motion = R_axis^(-1) * R_bvh * R_axis
-    
-    const Eigen::Matrix3d& R_axis = it->second;
-    Eigen::Matrix3d R_axis_inv = R_axis.transpose();
-    
-    return R_axis_inv * R_bvh * R_axis;
-}
-
-// Public function to enable/disable CMU compensation
-void SetCMUCompensation(bool enable)
-{
-    g_enableCMUCompensation = enable;
-    if (enable)
-    {
-        InitializeCMUAxisCompensation();
-        std::cout << "CMU axis compensation ENABLED" << std::endl;
-    }
-    else
-    {
-        std::cout << "CMU axis compensation DISABLED" << std::endl;
-    }
-}
-
-// ============================================================================
-// Original BVH code with CMU compensation integrated
-// ============================================================================
-
 Eigen::Matrix3d
 R_x(double x)
 {
@@ -170,6 +70,7 @@ Set(const Eigen::VectorXd& m_t)
 		default:break;
 		}
 	}
+
 }
 void
 BVHNode::
@@ -212,8 +113,7 @@ BVH::
 BVH(const dart::dynamics::SkeletonPtr& skel,const std::map<std::string,std::string>& bvh_map)
 	:mSkeleton(skel),mBVHMap(bvh_map),mCyclic(true)
 {
-    // Initialize CMU compensation on first BVH creation
-    InitializeCMUAxisCompensation();
+
 }
 
 Eigen::VectorXd
@@ -238,11 +138,6 @@ GetMotion(double t)
 	{
 		BodyNode* bn = mSkeleton->getBodyNode(ss.first);
 		Eigen::Matrix3d R = this->Get(ss.second);
-		
-		// MODIFIED: Apply CMU axis compensation
-		// This extracts R_motion from R_axis * R_motion * R_axis^(-1)
-		R = ApplyCMUCompensation(ss.second, R);
-		
 		Joint* jn = bn->getParentJoint();
 		int idx = jn->getIndexInSkeleton(0);
 
