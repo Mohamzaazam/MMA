@@ -8,6 +8,7 @@ build/
 *.Identifier
 runs/
 logs/
+data/outputs/
 
 nn/
 nn_base_run/
