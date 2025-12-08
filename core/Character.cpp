@@ -90,7 +90,10 @@ LoadBVH(const std::string& path,bool cyclic)
 		std::cout<<"Initialize BVH class first"<<std::endl;
 		return;
 	}
-	mBVH->Parse(path,cyclic);
+	std::string errMsg;
+	if(!mBVH->Parse(path, errMsg, cyclic)){
+		std::cout << "BVH Parse Error: " << errMsg << std::endl;
+	}
 }
 void
 Character::
