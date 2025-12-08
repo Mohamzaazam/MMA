@@ -669,6 +669,37 @@ Eigen::VectorXd BVH::GetMotion(double t)
         Eigen::Matrix3d R = Get(ss.second);
         Joint* jn = bn->getParentJoint();
         int idx = jn->getIndexInSkeleton(0);
+
+        // --- NEW RETARGETING LOGIC START ---
+        // Check if this is a leg joint and apply correction
+        if (ss.first == "FemurR") { // Check your specific node name in human.xml
+            // Vector from BVH: (-13.6, -37.5, 0) -> Direction (-0.34, -0.93, 0)
+            // Vector from DART: (0, -1, 0)
+            // We need to rotate DART vector (Down) to BVH vector (Out/Right).
+            // This is a rotation around +Z (forward) axis by atan2(-13.6, -37.5) approx +20 deg? 
+            // Wait, Right Leg is -X. 
+            // BVH Offset (-13, -37). Splayed Out.
+            // To align Down (0,-1) to (-0.34, -0.93), we rotate AROUND Z.
+            // Calculate precise offset rotation matrix here or hardcode for testing:
+            
+            // Example: Rotate ~20 degrees around Z axis (Check sign by trial)
+            // If legs are crossed, we need to rotate them OUT.
+            double angle = -20.0 * M_PI / 180.0; // Adjust sign if needed
+            Eigen::Matrix3d R_offset;
+            R_offset = Eigen::AngleAxisd(angle, Eigen::Vector3d::UnitZ());
+            
+            R = R * R_offset;
+        }
+        else if (ss.first == "FemurL") {
+            // Symmetric correction for left leg
+            double angle = 20.0 * M_PI / 180.0; // Adjust sign if needed
+            Eigen::Matrix3d R_offset;
+            R_offset = Eigen::AngleAxisd(angle, Eigen::Vector3d::UnitZ());
+            
+            R = R * R_offset;
+        }
+        // --- NEW RETARGETING LOGIC END ---
+
         
         if (jn->getType() == "FreeJoint")
         {
