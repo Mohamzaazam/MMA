@@ -3,23 +3,39 @@ import os
 import argparse
 from pathlib import Path
 
-def truncate_bvh(input_path, output_path, max_frames):
+
+def truncate_bvh(input_path, output_path, start_frame, num_frames):
     with open(input_path, 'r') as f:
         lines = f.readlines()
 
     with open(output_path, 'w') as f:
         motion_section = False
         frames_written = 0
+        skipped_frames = 0
         
+        # First pass to find original frame count
+        original_frames = 0
+        for line in lines:
+             if line.strip().startswith('Frames:'):
+                 parts = line.split()
+                 if len(parts) > 1:
+                     original_frames = int(parts[1])
+                 break
+        
+        # Calculate new frame count
+        if original_frames > 0:
+            available_frames = max(0, original_frames - start_frame)
+            if num_frames is None:
+                new_total_frames = available_frames
+            else:
+                new_total_frames = min(available_frames, num_frames)
+        else:
+             # Fallback if Frames header not found or valid
+             new_total_frames = 0 # Or handle differently
+
         for i, line in enumerate(lines):
             if line.strip().startswith('Frames:'):
-                parts = line.split()
-                if len(parts) > 1:
-                    original_frames = int(parts[1])
-                    new_frames = min(original_frames, max_frames)
-                    f.write(f"Frames:\t{new_frames}\n")
-                else:
-                    f.write(line)
+                f.write(f"Frames:\t{new_total_frames}\n")
             elif line.strip() == 'MOTION':
                 motion_section = True
                 f.write(line)
@@ -28,7 +44,9 @@ def truncate_bvh(input_path, output_path, max_frames):
             elif motion_section:
                 # This is a data line (or empty line at end)
                 if line.strip():
-                    if frames_written < max_frames:
+                    if skipped_frames < start_frame:
+                        skipped_frames += 1
+                    elif num_frames is None or frames_written < num_frames:
                         f.write(line)
                         frames_written += 1
                 else:
@@ -37,20 +55,18 @@ def truncate_bvh(input_path, output_path, max_frames):
                 # Header section
                 f.write(line)
     
-    print(f"Truncated BVH: {input_path} -> {output_path} ({frames_written} frames)")
+    print(f"Truncated BVH: {input_path} -> {output_path} (Skipped {skipped_frames}, Kept {frames_written} frames)")
 
-def truncate_amc(input_path, output_path, max_frames):
+def truncate_amc(input_path, output_path, start_frame, num_frames):
     with open(input_path, 'r') as f:
         lines = f.readlines()
 
     with open(output_path, 'w') as f:
-        frames_found = 0
-        current_frame_lines = []
-        
-        # AMC files have a header, then frames starting with a frame number
-        # We need to preserve the header
+        frames_skipped = 0
+        frames_written = 0
         
         header_done = False
+        skip_current_frame = False
         
         for line in lines:
             stripped = line.strip()
@@ -58,25 +74,33 @@ def truncate_amc(input_path, output_path, max_frames):
             # Check if it's a frame number (integer)
             if stripped.isdigit():
                 header_done = True
-                frames_found += 1
+                current_frame_idx = frames_skipped + frames_written # Logical index of found frames
                 
-                if frames_found > max_frames:
+                if frames_skipped < start_frame:
+                    frames_skipped += 1
+                    skip_current_frame = True
+                elif num_frames is None or frames_written < num_frames:
+                    skip_current_frame = False
+                    frames_written += 1
+                    # Renumber frame
+                    f.write(f"{frames_written}\n")
+                else:
+                    # Limit reached
                     break
-                
-                f.write(line)
             elif not header_done:
                 f.write(line)
             else:
                 # Data line for the current frame
-                if frames_found <= max_frames:
-                    f.write(line)
+                if not skip_current_frame:
+                     f.write(line)
 
-    print(f"Truncated AMC: {input_path} -> {output_path} ({min(frames_found, max_frames)} frames)")
+    print(f"Truncated AMC: {input_path} -> {output_path} (Skipped {frames_skipped}, Kept {frames_written} frames)")
 
 def main():
-    parser = argparse.ArgumentParser(description='Truncate BVH and AMC files to a specific number of frames.')
+    parser = argparse.ArgumentParser(description='Truncate BVH and AMC files to a specific subset of frames.')
     parser.add_argument('input', help='Input file or directory')
-    parser.add_argument('--frames', '-n', type=int, default=100, help='Number of frames to keep')
+    parser.add_argument('--frames', '-n', type=int, default=None, help='Number of frames to keep. If not specified, keeps all frames from start to end.')
+    parser.add_argument('--start', '-s', type=int, default=0, help='Number of frames to skip at the beginning.')
     parser.add_argument('--output', '-o', help='Output file or directory (optional). If omitted, adds _truncated suffix.')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite input files')
 
@@ -114,9 +138,9 @@ def main():
             out_path = file_path.with_name(f"{file_path.stem}_truncated{file_path.suffix}")
 
         if file_path.suffix.lower() == '.bvh':
-            truncate_bvh(file_path, out_path, args.frames)
+            truncate_bvh(file_path, out_path, args.start, args.frames)
         elif file_path.suffix.lower() == '.amc':
-            truncate_amc(file_path, out_path, args.frames)
+            truncate_amc(file_path, out_path, args.start, args.frames)
 
 if __name__ == '__main__':
     main()
