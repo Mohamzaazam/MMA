@@ -13,6 +13,8 @@ python download_cmu_mocap.py
 
 After download, data is organized by subject number:
 
+Default path: `E:/database/cmu/`
+
 ```
 cmu_mocap_data/
 └── subjects/

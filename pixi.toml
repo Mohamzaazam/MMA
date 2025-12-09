@@ -16,13 +16,13 @@ train = { cmd = "python python/main.py -d data/metadata_29_01.txt", env = { PYTH
 test = { cmd = "./build/render data/metadata_29_01.txt ./nn/max.pt ./nn/max_muscle.pt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb", OMP_NUM_THREADS = "8" } }
 
 train_multimodal = { cmd = "python python/main_multimodal.py --motion_list data/motion_list.txt --template data/metadata.txt --slaves 6", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb", OMP_NUM_THREADS = "8" } }
-test_multimodal = { cmd = "./build/render data/metadata_29_01.txt ./nn/multimodal_max.pt ./nn/multimodal_max_muscle.pt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb", OMP_NUM_THREADS = "8" } }
+test_multimodal = { cmd = "./build/render data/metadata_cmu.txt ./nn/multimodal_max.pt ./nn/multimodal_max_muscle.pt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb", OMP_NUM_THREADS = "8" } }
 
 # Training with performance monitoring
 train-profile = { cmd = "python -m cProfile -o profile.prof python/main.py -d data/metadata.txt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb" } }
 
 tensorboard = "python python/tensorboard_wsl.py --logdir=runs --host 127.0.0.1 --port 6006"
-render = { cmd = "./build/render data/metadata_29_01.txt", env = { PYTHONHOME = "$CONDA_PREFIX" } }
+render = { cmd = "./build/render data/metadata_cmu.txt", env = { PYTHONHOME = "$CONDA_PREFIX" } }
 
 # Clean build directory
 clean = "rm -rf build"
@@ -64,6 +64,9 @@ scipy = ">=1.16.3,<2"
 libgomp = ">=15.2.0,<16"
 libglx = ">=1.7.0,<2"
 libglvnd = ">=1.7.0,<2"
+tqdm = ">=4.67.1,<5"
+requests = ">=2.32.5,<3"
+beautifulsoup4 = ">=4.14.3,<5"
 
 [pypi-dependencies]
 torch = { version = "==2.5.1", index = "https://download.pytorch.org/whl/cu124" }

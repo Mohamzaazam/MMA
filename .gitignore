@@ -9,6 +9,7 @@ build/
 runs/
 logs/
 data/outputs/
+data/cmu/
 
 nn/
 nn_base_run/
