@@ -10,6 +10,11 @@ runs/
 logs/
 data/outputs/
 data/cmu/
+# allow json and txt files in data/cmu
+!data/cmu/*.json
+!data/cmu/*.txt
+!data/cmu/*.log
+
 
 nn/
 nn_base_run/

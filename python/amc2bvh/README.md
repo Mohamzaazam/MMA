@@ -8,7 +8,9 @@ Tools for converting CMU Motion Capture data from ASF/AMC format to BVH format.
 |------|-------------|
 | `standalone.py` | Core converter for single ASF/AMC to BVH conversion |
 | `batch_amc2bvh.py` | Batch converter with parallel processing |
-| `scrape_mocap_metadata.py` | Scrapes motion descriptions from CMU mocap database |
+| `bvh_parser.py` | Pure Python BVH parser |
+| `bvh_visualizer.py` | BVH motion visualization and analysis |
+
 
 ## Quick Start
 

@@ -22,6 +22,7 @@ test_multimodal = { cmd = "./build/render data/metadata_cmu.txt ./nn/multimodal_
 train-profile = { cmd = "python -m cProfile -o profile.prof python/main.py -d data/metadata.txt", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build", QT_QPA_PLATFORM = "xcb" } }
 
 tensorboard = "python python/tensorboard_wsl.py --logdir=runs --host 127.0.0.1 --port 6006"
+train_motion = { cmd = "python python/models/train_motion.py --bvh_files data/motion/walk.bvh data/motion/run.bvh --epochs 100", env = { PYTHONPATH = "build", LD_LIBRARY_PATH = "build" } }
 render = { cmd = "./build/render data/metadata_cmu.txt", env = { PYTHONHOME = "$CONDA_PREFIX" } }
 
 # Clean build directory
