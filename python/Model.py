@@ -12,7 +12,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 
-from utils import device, Tensor
+from rl_utils import device, Tensor
 
 # =============================================================================
 # Distribution Setup

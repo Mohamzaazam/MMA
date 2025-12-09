@@ -26,7 +26,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
-from utils import (
+from rl_utils import (
     device, Tensor, 
     Episode, Transition, MuscleTransition,
     EpisodeBuffer, ReplayBuffer, MuscleBuffer,
@@ -366,7 +366,7 @@ class BasePPO:
                 loss = loss_actor + loss_entropy + loss_critic
 
                 self.optimizer.zero_grad()
-                loss.backward(retain_graph=True)
+                loss.backward(retain_graph=False)
                 for param in self.model.parameters():
                     if param.grad is not None:
                         param.grad.data.clamp_(-0.5, 0.5)
@@ -407,7 +407,7 @@ class BasePPO:
                 loss = 0.01 * loss_reg + loss_target
 
                 self.optimizer_muscle.zero_grad()
-                loss.backward(retain_graph=True)
+                loss.backward(retain_graph=False)
                 for param in self.muscle_model.parameters():
                     if param.grad is not None:
                         param.grad.data.clamp_(-0.5, 0.5)

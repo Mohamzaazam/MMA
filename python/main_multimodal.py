@@ -43,7 +43,7 @@ from torch.utils.tensorboard import SummaryWriter
 # Import MASS modules
 from PPO import BasePPO
 from Model import SimulationNN, MuscleNN
-from utils import (
+from rl_utils import (
     device, Tensor,
     EpisodeBuffer, EpisodeBufferWithMotion, ReplayBuffer,
     Episode, EpisodeWithMotion, Transition,

@@ -1,5 +1,5 @@
 """
-utils.py - Common utility functions and classes for MASS training
+rl_utils.py - Common utility functions and classes for MASS training
 
 This module contains shared utilities used by:
 - main.py (single motion training)
