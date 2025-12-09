@@ -23,6 +23,10 @@ from typing import List, Dict, Optional, Tuple
 import warnings
 warnings.filterwarnings('ignore')
 
+# Import shared parser (can also use local Joint/BVHData/BVHParser for visualization-specific needs)
+from . import bvh_parser as shared_parser
+
+
 # =============================================================================
 # DATA STRUCTURES
 # =============================================================================

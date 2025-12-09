@@ -47,6 +47,13 @@ public:
 	const Eigen::MatrixXd& GetMuscleTuplesTauDes();
 	const Eigen::MatrixXd& GetMuscleTuplesL();
 	const Eigen::MatrixXd& GetMuscleTuplesb();
+	
+	// BVH Data Extraction for pre-training
+	int GetBVHFrameCount();
+	double GetBVHFrameTime();
+	double GetBVHMaxTime();
+	Eigen::VectorXd GetTargetPositions(double t);
+	std::pair<Eigen::VectorXd, Eigen::VectorXd> GetTargetPosAndVel(double t);
 private:
 	std::vector<MASS::Environment*> mEnvs;
 

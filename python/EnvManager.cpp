@@ -1,5 +1,6 @@
 #include "EnvManager.h"
 #include "DARTHelper.h"
+#include "BVH.h"
 #include <omp.h>
 
 EnvManager::
@@ -316,6 +317,47 @@ GetMuscleTuplesb()
 	return mMuscleTuplesb;
 }
 
+// =============================================================================
+// BVH Data Extraction for Pre-training
+// =============================================================================
+
+int
+EnvManager::
+GetBVHFrameCount()
+{
+	return mEnvs[0]->GetCharacter()->GetBVH()->GetNumFrames();
+}
+
+double
+EnvManager::
+GetBVHFrameTime()
+{
+	return mEnvs[0]->GetCharacter()->GetBVH()->GetTimeStep();
+}
+
+double
+EnvManager::
+GetBVHMaxTime()
+{
+	return mEnvs[0]->GetCharacter()->GetBVH()->GetMaxTime();
+}
+
+Eigen::VectorXd
+EnvManager::
+GetTargetPositions(double t)
+{
+	double dt = 1.0 / GetControlHz();
+	return mEnvs[0]->GetCharacter()->GetTargetPositions(t, dt);
+}
+
+std::pair<Eigen::VectorXd, Eigen::VectorXd>
+EnvManager::
+GetTargetPosAndVel(double t)
+{
+	double dt = 1.0 / GetControlHz();
+	return mEnvs[0]->GetCharacter()->GetTargetPosAndVel(t, dt);
+}
+
 PYBIND11_MODULE(pymss, m)
 {
 	py::class_<EnvManager>(m, "pymss")
@@ -346,5 +388,11 @@ PYBIND11_MODULE(pymss, m)
 		.def("GetMuscleTuplesJtA",&EnvManager::GetMuscleTuplesJtA)
 		.def("GetMuscleTuplesTauDes",&EnvManager::GetMuscleTuplesTauDes)
 		.def("GetMuscleTuplesL",&EnvManager::GetMuscleTuplesL)
-		.def("GetMuscleTuplesb",&EnvManager::GetMuscleTuplesb);
+		.def("GetMuscleTuplesb",&EnvManager::GetMuscleTuplesb)
+		// BVH extraction methods for pre-training
+		.def("GetBVHFrameCount",&EnvManager::GetBVHFrameCount)
+		.def("GetBVHFrameTime",&EnvManager::GetBVHFrameTime)
+		.def("GetBVHMaxTime",&EnvManager::GetBVHMaxTime)
+		.def("GetTargetPositions",&EnvManager::GetTargetPositions)
+		.def("GetTargetPosAndVel",&EnvManager::GetTargetPosAndVel);
 }

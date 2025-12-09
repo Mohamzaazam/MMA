@@ -316,8 +316,8 @@ GetState()
 	double t_phase = mCharacter->GetBVH()->GetMaxTime();
 	double phi = std::fmod(mWorld->getTime(),t_phase)/t_phase;
 
-	p *= 0.8;
-	v *= 0.2;
+	// p *= 0.8;
+	// v *= 0.2;
 
 	Eigen::VectorXd state(p.rows()+v.rows()+1);
 
