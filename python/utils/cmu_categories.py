@@ -2,28 +2,29 @@
 CMU Mocap Activity Categories.
 
 Dynamically loads activity categories from trials.txt files in CMU subject directories.
-Source: http://mocap.cs.cmu.edu/
+Supports trial-level activity splitting for balanced train/val sets.
 """
 
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 
 
-def load_subject_info(cmu_dir: str) -> Dict[int, Dict]:
+def load_trial_info(cmu_dir: str) -> Dict[str, Dict]:
     """
-    Load subject information from trials.txt files.
+    Load trial-level information from trials.txt files.
     
     Returns:
-        Dict mapping subject_id -> {
-            'description': str,  # Main activity description
-            'trials': Dict[str, str],  # trial_id -> trial description
-            'category': str,  # Inferred category
+        Dict mapping file_path -> {
+            'subject': int,
+            'trial_id': str,
+            'description': str,
+            'activity': str,  # Inferred activity category
         }
     """
     cmu_path = Path(cmu_dir)
-    subjects = {}
+    trials = {}
     
     for subject_dir in cmu_path.iterdir():
         if not subject_dir.is_dir():
@@ -35,203 +36,196 @@ def load_subject_info(cmu_dir: str) -> Dict[int, Dict]:
             continue
         
         trials_file = subject_dir / 'trials.txt'
-        if not trials_file.exists():
-            # Fallback: infer from BVH filenames
-            bvh_files = list(subject_dir.glob('*.bvh'))
-            if bvh_files:
-                subjects[subject_id] = {
-                    'description': 'unknown',
-                    'trials': {},
-                    'category': 'general',
-                }
-            continue
+        trial_descriptions = {}
         
-        with open(trials_file, 'r') as f:
-            content = f.read()
+        if trials_file.exists():
+            with open(trials_file, 'r') as f:
+                content = f.read()
+            
+            # Parse trials: trial_id: description
+            for match in re.finditer(r'(\d+_\d+):\s*(.+)', content):
+                trial_id, desc = match.groups()
+                trial_descriptions[trial_id] = desc.strip()
         
-        # Parse header: # Subject XX: description
-        header_match = re.search(r'# Subject \d+:\s*(.+)', content)
-        description = header_match.group(1).strip() if header_match else 'unknown'
-        
-        # Parse trials
-        trials = {}
-        for match in re.finditer(r'(\d+_\d+):\s*(.+)', content):
-            trial_id, trial_desc = match.groups()
-            trials[trial_id] = trial_desc.strip()
-        
-        # Infer category from description
-        category = infer_category(description)
-        
-        subjects[subject_id] = {
-            'description': description,
-            'trials': trials,
-            'category': category,
-        }
+        # Process BVH files
+        for bvh_file in subject_dir.glob('*.bvh'):
+            trial_id = bvh_file.stem  # e.g., "16_01"
+            description = trial_descriptions.get(trial_id, 'unknown')
+            activity = infer_activity(description)
+            
+            trials[str(bvh_file)] = {
+                'subject': subject_id,
+                'trial_id': trial_id,
+                'description': description,
+                'activity': activity,
+            }
     
-    return subjects
+    return trials
 
 
-def infer_category(description: str) -> str:
-    """Infer activity category from description text."""
+def infer_activity(description: str) -> str:
+    """Infer activity category from trial description."""
     desc_lower = description.lower()
     
-    # Keywords for each category
-    categories = {
-        'locomotion': ['walk', 'run', 'jog', 'step', 'gait', 'stride'],
-        'dance': ['dance', 'salsa', 'charleston', 'ballet', 'indian dance'],
-        'sports': ['basketball', 'soccer', 'football', 'golf', 'kick', 'throw', 'catch', 
-                   'swimming', 'sports', 'athletic'],
-        'acrobatics': ['jump', 'flip', 'cartwheel', 'acrobatic', 'gymnastic', 
-                       'breakdance', 'hopscotch'],
-        'playground': ['playground', 'climb', 'swing', 'hang'],
-        'interaction': ['interaction', 'human interaction', 'communication', 
-                        'two subjects', '2 subjects'],
-        'pantomime': ['pantomime', 'animal behavior', 'nursery rhyme', 'recreation'],
-        'everyday': ['everyday', 'behavior', 'expression', 'general', 'careful', 
-                     'assorted', 'various'],
-        'stylized': ['stylized', 'weird walk', 'martial art', 'action', 
-                     'michael jackson', 'baby'],
-        'terrain': ['terrain', 'slope', 'obstacle', 'uneven', 'stairs'],
+    # Priority order matters - check more specific patterns first
+    patterns = {
+        'walk': ['walk', 'stroll', 'stride', 'step', 'march', 'pace'],
+        'run': ['run', 'jog', 'sprint', 'dash'],
+        'jump': ['jump', 'leap', 'hop', 'bound', 'hopscotch'],
+        # 'dance': ['dance', 'salsa', 'charleston', 'ballet', 'sway', 'pirouette'],
+        # 'basketball': ['basketball', 'dribble', 'shoot', 'layup'],
+        # 'soccer': ['soccer', 'kick ball', 'kick soccer'],
+        # 'golf': ['golf', 'swing club'],
+        # 'climb': ['climb', 'hang', 'swing', 'playground', 'pull up'],
+        # 'sit': ['sit', 'seated', 'chair'],
+        # 'stand': ['stand', 'idle', 'rest'],
+        # 'turn': ['turn', 'rotate', 'spin', 'pivot'],
+        # 'bend': ['bend', 'lean', 'crouch', 'duck', 'bow'],
+        # 'throw': ['throw', 'catch', 'toss'],
+        # 'punch': ['punch', 'hit', 'strike', 'box'],
+        # 'kick': ['kick'],
+        # 'flip': ['flip', 'cartwheel', 'somersault', 'acrobat', 'tumble'],
+        # 'swim': ['swim', 'stroke'],
+        # 'gesture': ['gesture', 'point', 'wave', 'signal'],
+        # 'talk': ['talk', 'convers', 'speak'],
+        # 'carry': ['carry', 'lift', 'hold', 'suitcase', 'box'],
+        # 'push': ['push', 'shove'],
+        # 'pull': ['pull', 'drag'],
+        # 'crawl': ['crawl', 'creep'],
     }
     
-    for cat, keywords in categories.items():
+    for activity, keywords in patterns.items():
         for kw in keywords:
             if kw in desc_lower:
-                return cat
+                return activity
     
     return 'general'
 
 
-def get_category_subjects(cmu_dir: str) -> Dict[str, List[int]]:
-    """Get subjects grouped by activity category."""
-    subjects = load_subject_info(cmu_dir)
+def get_activity_files(cmu_dir: str) -> Dict[str, List[str]]:
+    """Group files by their inferred activity."""
+    trials = load_trial_info(cmu_dir)
     
-    category_subjects = defaultdict(list)
-    for subj_id, info in subjects.items():
-        category_subjects[info['category']].append(subj_id)
+    activity_files = defaultdict(list)
+    for filepath, info in trials.items():
+        activity_files[info['activity']].append(filepath)
     
-    return dict(category_subjects)
+    return dict(activity_files)
 
 
-def get_subject_category(subject_id: int, cmu_dir: str = "data/cmu") -> str:
-    """Get activity category for a subject."""
-    subjects = load_subject_info(cmu_dir)
-    if subject_id in subjects:
-        return subjects[subject_id]['category']
-    return 'general'
-
-
-def stratified_split(
+def activity_stratified_split(
     bvh_files: List[str],
     cmu_dir: str,
     train_ratio: float = 0.8,
     seed: int = 42,
-    max_subjects: Optional[int] = None,
-) -> tuple:
+    max_files: Optional[int] = None,
+    min_activity_files: int = 2,
+) -> Tuple[List[str], List[str], Dict]:
     """
-    Stratified split ensuring activity category overlap between train and val.
+    Split files by activity category, ensuring each activity
+    is represented in both train and val sets.
     
+    NOTE: This may have subject overlap between train/val.
+    For no-subject-overlap, use subject_split() instead.
+    
+    Args:
+        bvh_files: List of BVH file paths
+        cmu_dir: CMU data directory
+        train_ratio: Ratio for train split
+        seed: Random seed
+        max_files: Max files per activity (for testing)
+        min_activity_files: Min files needed for an activity to be included
+        
     Returns:
         (train_files, val_files, split_info)
     """
     import random
     random.seed(seed)
     
-    # Load subject info
-    subjects_info = load_subject_info(cmu_dir)
+    # Load trial info
+    all_trials = load_trial_info(cmu_dir)
     
-    # Group files by subject
-    subject_files = defaultdict(list)
+    # Filter to requested files and group by activity
+    activity_files = defaultdict(list)
     for f in bvh_files:
-        match = re.search(r'/(\d+)/\d+_\d+\.bvh$', f) or re.search(r'(\d+)_\d+\.bvh$', f)
-        if match:
-            subject_id = int(match.group(1))
-            subject_files[subject_id].append(f)
-    
-    # Group subjects by category
-    category_subjects = defaultdict(list)
-    for subj_id in subject_files.keys():
-        if subj_id in subjects_info:
-            cat = subjects_info[subj_id]['category']
+        if f in all_trials:
+            activity = all_trials[f]['activity']
+            activity_files[activity].append(f)
         else:
-            cat = 'general'
-        category_subjects[cat].append(subj_id)
+            activity_files['general'].append(f)
     
-    # Limit subjects if specified (proportionally from each category)
-    if max_subjects and max_subjects < len(subject_files):
-        selected = []
-        n_cats = len(category_subjects)
-        per_cat = max(1, max_subjects // n_cats)
-        
-        for cat, subjs in category_subjects.items():
-            random.shuffle(subjs)
-            selected.extend(subjs[:per_cat])
-        
-        # Fill remaining
-        remaining = max_subjects - len(selected)
-        all_subjs = list(subject_files.keys())
-        random.shuffle(all_subjs)
-        for s in all_subjs:
-            if s not in selected and remaining > 0:
-                selected.append(s)
-                remaining -= 1
-        
-        # Filter to selected
-        subject_files = {s: subject_files[s] for s in selected if s in subject_files}
-        
-        # Rebuild category mapping
-        category_subjects = defaultdict(list)
-        for subj_id in subject_files.keys():
-            cat = subjects_info.get(subj_id, {}).get('category', 'general')
-            category_subjects[cat].append(subj_id)
+    # Filter activities with too few files
+    valid_activities = {
+        act: files for act, files in activity_files.items()
+        if len(files) >= min_activity_files
+    }
     
-    # Stratified split: from each category, split subjects
-    train_subjects = []
-    val_subjects = []
+    print(f"Found {len(valid_activities)} activities with >= {min_activity_files} files")
     
-    for cat, subjs in category_subjects.items():
-        if not subjs:
-            continue
-        random.shuffle(subjs)
-        split_idx = max(1, int(len(subjs) * train_ratio))
-        
-        # Ensure at least one in val if possible
-        if len(subjs) > 1 and split_idx == len(subjs):
-            split_idx -= 1
-        
-        train_subjects.extend(subjs[:split_idx])
-        val_subjects.extend(subjs[split_idx:])
-    
-    # Collect files
+    # Split each activity
     train_files = []
     val_files = []
-    for s in train_subjects:
-        train_files.extend(subject_files.get(s, []))
-    for s in val_subjects:
-        val_files.extend(subject_files.get(s, []))
+    activity_distribution = {}
+    
+    for activity, files in sorted(valid_activities.items()):
+        random.shuffle(files)
+        
+        # Limit files if requested
+        if max_files:
+            files = files[:max_files]
+        
+        # Split ensuring at least 1 in each set
+        n = len(files)
+        n_train = max(1, int(n * train_ratio))
+        n_train = min(n_train, n - 1) if n > 1 else n  # Leave at least 1 for val
+        
+        train_files.extend(files[:n_train])
+        val_files.extend(files[n_train:])
+        
+        activity_distribution[activity] = {
+            'total': n,
+            'train': n_train,
+            'val': n - n_train,
+        }
     
     # Build split info
-    train_cats = set(subjects_info.get(s, {}).get('category', 'general') for s in train_subjects)
-    val_cats = set(subjects_info.get(s, {}).get('category', 'general') for s in val_subjects)
+    train_activities = set()
+    val_activities = set()
+    for f in train_files:
+        if f in all_trials:
+            train_activities.add(all_trials[f]['activity'])
+    for f in val_files:
+        if f in all_trials:
+            val_activities.add(all_trials[f]['activity'])
     
     split_info = {
-        'train_subjects': sorted(train_subjects),
-        'val_subjects': sorted(val_subjects),
-        'train_categories': sorted(train_cats),
-        'val_categories': sorted(val_cats),
-        'category_overlap': sorted(train_cats & val_cats),
-        'category_distribution': {cat: len(subjs) for cat, subjs in category_subjects.items()},
+        'train_files': len(train_files),
+        'val_files': len(val_files),
+        'activities': list(activity_distribution.keys()),
+        'activity_distribution': activity_distribution,
+        'train_activities': sorted(train_activities),
+        'val_activities': sorted(val_activities),
+        'activity_overlap': sorted(train_activities & val_activities),
     }
     
     return train_files, val_files, split_info
 
 
+def print_activity_split_info(split_info: dict):
+    """Print activity split information."""
+    print(f"\n✓ Activity-based split:")
+    print(f"  Activities: {len(split_info['activities'])}")
+    for act, dist in sorted(split_info['activity_distribution'].items()):
+        print(f"    {act}: {dist['train']} train / {dist['val']} val")
+    print(f"  Activity overlap: {len(split_info['activity_overlap'])}/{len(split_info['activities'])}")
+    print(f"  Train: {split_info['train_files']} files, Val: {split_info['val_files']} files")
+
+
+# Keep old functions for backward compatibility
+def stratified_split(*args, **kwargs):
+    """Alias for activity_stratified_split (backward compatibility)."""
+    return activity_stratified_split(*args, **kwargs)
+
 def print_split_info(split_info: dict):
-    """Print stratified split information."""
-    print(f"\n✓ Activity-stratified split:")
-    print(f"  Categories: {list(split_info['category_distribution'].keys())}")
-    for cat, count in split_info['category_distribution'].items():
-        print(f"    {cat}: {count} subjects")
-    print(f"  Train subjects ({len(split_info['train_subjects'])}): {split_info['train_subjects'][:10]}...")
-    print(f"  Val subjects ({len(split_info['val_subjects'])}): {split_info['val_subjects']}")
-    print(f"  Category overlap: {split_info['category_overlap']}")
+    """Alias for print_activity_split_info (backward compatibility)."""
+    return print_activity_split_info(split_info)

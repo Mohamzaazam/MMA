@@ -6,6 +6,7 @@ build/
 *.pyd
 *.lock
 *.Identifier
+eval_results/
 runs/
 logs/
 data/outputs/

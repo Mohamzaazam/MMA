@@ -174,7 +174,7 @@ Examples:
         """
     )
     
-    parser.add_argument('output_dir', 
+    parser.add_argument('--output_dir', default='/mnt/e/database/cmu',
                         help='Output directory (CMU data root, e.g., /mnt/e/database/cmu)')
     parser.add_argument('--format', choices=['txt', 'json'], default='txt',
                         help='Output format for per-subject files (default: txt)')

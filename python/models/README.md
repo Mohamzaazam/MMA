@@ -63,6 +63,21 @@ pixi run tensorboard
 | `--epochs` | 100 | Training epochs |
 | `--verbose` | off | Show C++ parsing output (default: log to file) |
 
+## Evaluation
+
+```bash
+# Evaluate trained model and generate plots
+pixi run python python/models/eval_motion.py \
+    --model nn/motion_model_best.pt \
+    --bvh_dir data/cmu \
+    --output_dir eval_results
+
+# Results saved to eval_results/
+#   - prediction_scatter.png (input vs output)
+#   - trajectory.png (time series comparison)
+#   - error_distribution.png (MSE analysis)
+```
+
 ## Outputs
 
 - `nn/motion_model.pt` — Final checkpoint

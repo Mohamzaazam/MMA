@@ -41,12 +41,37 @@ def get_device() -> torch.device:
     return torch.device('cpu')
 
 
-def cosine_lr_scheduler(optimizer, epoch, max_epochs, base_lr, min_lr=1e-6):
-    """Cosine learning rate decay."""
-    lr = min_lr + 0.5 * (base_lr - min_lr) * (1 + np.cos(np.pi * epoch / max_epochs))
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-    return lr
+def get_scheduler(optimizer, epochs, warmup_epochs=25, T_0=10, T_mult=2):
+    """
+    Create cosine annealing with warm restarts scheduler.
+    
+    Args:
+        optimizer: PyTorch optimizer
+        epochs: Total training epochs
+        warmup_epochs: Linear warmup epochs
+        T_0: Initial restart period
+        T_mult: Restart period multiplier
+    """
+    from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, LinearLR, SequentialLR
+    
+    # Warm restarts scheduler
+    cosine_scheduler = CosineAnnealingWarmRestarts(
+        optimizer, T_0=T_0, T_mult=T_mult, eta_min=1e-6
+    )
+    
+    if warmup_epochs > 0:
+        # Linear warmup
+        warmup_scheduler = LinearLR(
+            optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs
+        )
+        # Sequential: warmup then cosine
+        scheduler = SequentialLR(
+            optimizer, [warmup_scheduler, cosine_scheduler], milestones=[warmup_epochs]
+        )
+    else:
+        scheduler = cosine_scheduler
+    
+    return scheduler
 
 
 from contextlib import contextmanager
@@ -337,7 +362,7 @@ def train(args):
             args.bvh_dir,
             train_ratio=args.train_ratio,
             seed=313,
-            max_subjects=args.max_subjects,
+            max_files=args.max_subjects,  # Limit files per activity
         )
         print_split_info(split_info)
         print(f"  Train files: {len(train_files)}, Val files: {len(val_files)}")
@@ -402,6 +427,15 @@ def train(args):
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     criterion = nn.MSELoss()
     
+    # Learning rate scheduler with warm restarts
+    scheduler = get_scheduler(
+        optimizer, 
+        epochs=args.epochs,
+        warmup_epochs=min(25, args.epochs // 2),
+        T_0=max(10, args.epochs // 5),
+        T_mult=2
+    )
+    
     # Training loop
     best_val_loss = float('inf')
     rollout_steps = [5, 10, 30]
@@ -409,11 +443,12 @@ def train(args):
     print(f"\nTraining for {args.epochs} epochs...")
     
     for epoch in range(1, args.epochs + 1):
-        # Learning rate schedule
-        lr = cosine_lr_scheduler(optimizer, epoch, args.epochs, args.lr)
-        
         # Train
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
+        
+        # Step scheduler after each epoch
+        scheduler.step()
+        lr = optimizer.param_groups[0]['lr']
         
         # Validate
         val_loss = validate(model, val_loader, criterion, device)
@@ -470,7 +505,7 @@ def main():
                         help='Train/val split ratio')
     parser.add_argument('--subject_split', action='store_true',
                         help='Use subject-based splitting')
-    parser.add_argument('--max_subjects', type=int, default=None,
+    parser.add_argument('--max_subjects', type=int, default=10,
                         help='Max number of subjects to use (for testing)')
     parser.add_argument('--activity_split', action='store_true',
                         help='Use activity-stratified splitting (ensures activity overlap)')
@@ -495,9 +530,9 @@ def main():
                         help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=256,
                         help='Batch size')
-    parser.add_argument('--lr', type=float, default=1e-3,
+    parser.add_argument('--lr', type=float, default=1e-4,
                         help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=1e-4,
+    parser.add_argument('--weight_decay', type=float, default=1e-5,
                         help='Weight decay')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='DataLoader workers')

@@ -52,6 +52,11 @@ def validate_bvh_file(filepath: Path) -> Tuple[bool, str, int]:
     """
     Validate a BVH file.
     
+    Checks:
+    - File exists and non-empty
+    - Has HIERARCHY, MOTION, ROOT sections
+    - Frame count declared matches actual motion data lines
+    
     Returns: (is_valid, error_message, frame_count)
     """
     try:
@@ -72,19 +77,35 @@ def validate_bvh_file(filepath: Path) -> Tuple[bool, str, int]:
         if 'ROOT' not in content:
             return False, "Missing ROOT joint", 0
         
-        # Extract frame count
+        # Split at MOTION to get motion data
+        parts = content.split('MOTION')
+        if len(parts) != 2:
+            return False, "Invalid MOTION section", 0
+        
+        motion_section = parts[1]
+        lines = [l.strip() for l in motion_section.split('\n') if l.strip()]
+        
+        # Extract declared frame count
         frame_count = 0
-        for line in content.split('\n'):
-            line = line.strip()
+        motion_start_idx = 0
+        for i, line in enumerate(lines):
             if line.startswith('Frames:'):
                 try:
                     frame_count = int(line.split(':')[1].strip())
                 except:
                     return False, "Cannot parse frame count", 0
+            elif line.startswith('Frame Time:'):
+                motion_start_idx = i + 1
                 break
         
         if frame_count == 0:
             return False, "Frame count is 0", 0
+        
+        # Count actual motion data lines
+        actual_frames = len(lines) - motion_start_idx
+        
+        if actual_frames < frame_count:
+            return False, f"Truncated: {actual_frames}/{frame_count} frames", actual_frames
         
         return True, "", frame_count
         
@@ -140,6 +161,24 @@ def copy_trials_metadata(
             print(f"  Copied trials.txt for subject {subject_id}")
     
     return copied
+
+
+def remove_subjects_without_trials(
+    output_dir: Path,
+    subjects: List[str],
+) -> int:
+    """Remove subject directories that don't have trials.txt."""
+    removed = 0
+    
+    for subject_id in subjects:
+        subject_dir = output_dir / subject_id
+        if subject_dir.exists():
+            bvh_count = len(list(subject_dir.glob("*.bvh")))
+            shutil.rmtree(subject_dir)
+            removed += 1
+            print(f"  Removed subject {subject_id} ({bvh_count} BVH files)")
+    
+    return removed
 
 
 def verify_conversion(
@@ -232,15 +271,88 @@ def verify_conversion(
     return report
 
 
+def reconvert_invalid_files(
+    invalid_details: List[Dict],
+    output_dir: Path,
+    source_dir: Path,
+) -> int:
+    """
+    Reconvert invalid BVH files.
+    
+    Args:
+        invalid_details: List of {'subject': str, 'file': str} dicts
+        output_dir: Directory containing BVH files
+        source_dir: Source directory with ASF/AMC files
+        
+    Returns:
+        Number of successfully reconverted files
+    """
+    import subprocess
+    import sys
+    
+    # Group by subject
+    subjects_to_fix = set()
+    files_to_fix = []
+    
+    for detail in invalid_details:
+        subject = detail['subject']
+        filename = detail['file'].split(':')[0]  # Remove error message
+        subjects_to_fix.add(subject)
+        files_to_fix.append((subject, filename))
+    
+    print(f"\nReconverting {len(files_to_fix)} invalid files from {len(subjects_to_fix)} subjects...")
+    
+    # Delete invalid files first
+    for subject, filename in files_to_fix:
+        invalid_path = output_dir / subject / filename
+        if invalid_path.exists():
+            invalid_path.unlink()
+            print(f"  Deleted: {subject}/{filename}")
+    
+    # Reconvert using batch_amc2bvh
+    subjects_arg = ','.join(sorted(subjects_to_fix))
+    
+    cmd = [
+        sys.executable,
+        'python/amc2bvh/batch_amc2bvh.py',
+        str(source_dir.parent if source_dir.name == 'subjects' else source_dir),
+        '-o', str(output_dir),
+        '--walk-bvh',
+        '--subjects', subjects_arg,
+        '--force',  # Force reconversion
+    ]
+    
+    print(f"  Running: {' '.join(cmd)}")
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode == 0:
+            print(f"  Reconversion completed successfully")
+            return len(files_to_fix)
+        else:
+            print(f"  Reconversion failed: {result.stderr[:200]}")
+            return 0
+    except subprocess.TimeoutExpired:
+        print(f"  Reconversion timed out")
+        return 0
+    except Exception as e:
+        print(f"  Reconversion error: {e}")
+        return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Verify BVH conversion integrity',
     )
     parser.add_argument('output_dir', help='Directory containing converted BVH files')
     parser.add_argument('--source', type=str, default=None,
-                       help='Source directory for metadata copy')
+                       help='Source directory for metadata copy and reconversion')
     parser.add_argument('--fix', action='store_true',
                        help='Copy missing trials.txt from source')
+    parser.add_argument('--reconvert', action='store_true',
+                       help='Reconvert invalid/truncated BVH files')
+    parser.add_argument('--remove-no-trials', action='store_true',
+                       help='Remove subjects without trials.txt metadata')
     
     args = parser.parse_args()
     
@@ -253,9 +365,27 @@ def main():
     
     report = verify_conversion(output_dir, source_dir, args.fix)
     
+    # Reconvert if requested and there are invalid files
+    if args.reconvert and report.invalid_files > 0 and source_dir:
+        reconverted = reconvert_invalid_files(report.invalid_details, output_dir, source_dir)
+        if reconverted > 0:
+            print(f"\nRe-verifying after reconversion...")
+            report = verify_conversion(output_dir, source_dir, args.fix)
+    elif args.reconvert and report.invalid_files > 0 and not source_dir:
+        print("\n--reconvert requires --source to be specified")
+    
+    # Remove subjects without trials.txt if requested
+    if getattr(args, 'remove_no_trials', False) and report.subjects_missing_trials:
+        print(f"\nRemoving subjects without trials.txt...")
+        removed = remove_subjects_without_trials(output_dir, report.subjects_missing_trials)
+        print(f"Removed {removed} subjects")
+        # Update report
+        report = verify_conversion(output_dir, source_dir, False)
+    
     if report.invalid_files > 0:
         exit(1)
 
 
 if __name__ == '__main__':
     main()
+

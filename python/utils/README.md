@@ -48,5 +48,5 @@ states = extractor.extract_all_states()  # (N, 112) - 56 pos + 56 vel
 Check BVH file integrity after conversion:
 
 ```bash
-pixi run python python/utils/verify_conversion.py data/cmu --source /mnt/e/database/cmu --fix
+pixi run python python/utils/verify_conversion.py data/cmu --source /mnt/e/database/cmu --fix --reconvert
 ```
