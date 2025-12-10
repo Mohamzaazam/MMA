@@ -591,3 +591,251 @@ class LazyBVHDataset(Dataset if TORCH_AVAILABLE else object):
         data = np.load(self.npz_files[0])
         return data['states'].shape[1]
 
+
+class StreamingBVHDataset(Dataset if TORCH_AVAILABLE else object):
+    """
+    Memory-efficient dataset that loads BVH files on-demand.
+    
+    Unlike LazyBVHDataset, this doesn't require pre-extraction.
+    It keeps only a subset of files in memory and refreshes periodically.
+    
+    Usage:
+        dataset = StreamingBVHDataset(
+            bvh_files, 
+            max_files_in_memory=20,  # Only load 20 files at a time
+            refresh_every=5000,       # Refresh file pool every 5000 samples
+        )
+    """
+    
+    def __init__(
+        self,
+        bvh_files: List[str],
+        metadata_template: str = "data/metadata.txt",
+        build_dir: str = "build",
+        mode: str = "mlp",
+        seq_len: int = 32,
+        normalize: bool = True,
+        normalizer: Optional[StateNormalizer] = None,
+        max_files_in_memory: int = 20,
+        refresh_every: int = 5000,
+        seed: int = 42,
+    ):
+        """
+        Args:
+            bvh_files: List of all BVH file paths
+            metadata_template: Path to metadata template
+            build_dir: Build directory for pymss
+            mode: 'mlp', 'transformer', or 'autoregressive'
+            seq_len: Sequence length for transformer modes
+            normalize: Whether to normalize states
+            normalizer: Pre-fitted normalizer (required for val set)
+            max_files_in_memory: Max files to keep loaded at once
+            refresh_every: Refresh file pool every N samples
+            seed: Random seed for file sampling
+        """
+        if not TORCH_AVAILABLE:
+            raise ImportError("PyTorch required")
+        
+        super().__init__()
+        self.all_bvh_files = bvh_files
+        self.metadata_template = metadata_template
+        self.build_dir = build_dir
+        self.mode = mode
+        self.seq_len = seq_len
+        self.normalize = normalize
+        self.max_files = min(max_files_in_memory, len(bvh_files))
+        self.refresh_every = refresh_every
+        self.seed = seed
+        
+        # Parse metadata template
+        self._skeleton_file = "data/human.xml"
+        self._muscle_file = "data/muscle284.xml"
+        self._parse_metadata_template(metadata_template)
+        
+        # For validation set, we need a pre-fitted normalizer
+        if normalizer is not None:
+            self.normalizer = normalizer
+            self._normalizer_provided = True
+        else:
+            self.normalizer = None
+            self._normalizer_provided = False
+        
+        # Initialize state tracking
+        self._sample_counter = 0
+        self._rng = np.random.RandomState(seed)
+        
+        # Current data in memory
+        self._current_files: List[str] = []
+        self._current_states: Optional[np.ndarray] = None
+        self._current_indices: List[int] = []
+        self._states_tensor: Optional[torch.Tensor] = None
+        
+        # First-time normalization: load a sample of files to fit normalizer
+        if not self._normalizer_provided:
+            self._fit_normalizer_from_sample()
+        
+        # Load initial file pool
+        self._refresh_file_pool()
+    
+    def _parse_metadata_template(self, template_path: str):
+        try:
+            with open(template_path, 'r') as f:
+                for line in f:
+                    if line.startswith('skel_file'):
+                        self._skeleton_file = line.split()[1].lstrip('/')
+                    elif line.startswith('muscle_file'):
+                        self._muscle_file = line.split()[1].lstrip('/')
+        except FileNotFoundError:
+            pass
+    
+    def _fit_normalizer_from_sample(self):
+        """Fit normalizer from a sample of files (for train set)."""
+        import tempfile
+        import os
+        
+        # Sample files for normalization (use more files for better stats)
+        sample_size = min(50, len(self.all_bvh_files))
+        sample_files = self._rng.choice(self.all_bvh_files, sample_size, replace=False)
+        
+        all_states = []
+        mass_root = os.environ.get('MASS_ROOT', os.getcwd())
+        
+        print(f"Fitting normalizer from {sample_size} files...")
+        for bvh_file in sample_files:
+            states = self._load_single_file(bvh_file, mass_root)
+            if states is not None:
+                all_states.append(states)
+        
+        if not all_states:
+            raise ValueError("Failed to load any files for normalization")
+        
+        combined = np.concatenate(all_states, axis=0)
+        self.normalizer = StateNormalizer().fit(combined)
+        print(f"Normalizer fitted on {len(combined)} frames")
+    
+    def _load_single_file(self, bvh_file: str, mass_root: str) -> Optional[np.ndarray]:
+        """Load a single BVH file and return states."""
+        import tempfile
+        
+        bvh_path = Path(bvh_file)
+        if bvh_path.is_absolute():
+            try:
+                bvh_rel = bvh_path.relative_to(mass_root)
+            except ValueError:
+                bvh_rel = bvh_path
+        else:
+            bvh_rel = bvh_path
+        
+        metadata_content = f"""use_muscle true
+con_hz 30
+sim_hz 600
+skel_file /{self._skeleton_file}
+muscle_file /{self._muscle_file}
+bvh_file /{bvh_rel} false
+reward_param 0.75 0.1 0.0 0.15
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            f.write(metadata_content)
+            temp_path = f.name
+        
+        try:
+            extractor = BVHStateExtractor(temp_path, self.build_dir)
+            states = extractor.extract_all_states(include_phase=False)
+            return states
+        except Exception as e:
+            return None
+        finally:
+            try:
+                Path(temp_path).unlink()
+            except:
+                pass
+    
+    def _refresh_file_pool(self):
+        """Load a new random subset of files into memory."""
+        import os
+        
+        # Sample new files
+        self._current_files = list(self._rng.choice(
+            self.all_bvh_files, self.max_files, replace=False
+        ))
+        
+        mass_root = os.environ.get('MASS_ROOT', os.getcwd())
+        
+        # Load states from selected files
+        all_states = []
+        file_boundaries = [0]
+        
+        for bvh_file in self._current_files:
+            states = self._load_single_file(bvh_file, mass_root)
+            if states is not None:
+                all_states.append(states)
+                file_boundaries.append(file_boundaries[-1] + len(states))
+        
+        if not all_states:
+            raise ValueError("Failed to load any files")
+        
+        # Concatenate and normalize
+        self._current_states = np.concatenate(all_states, axis=0)
+        if self.normalize and self.normalizer is not None:
+            self._current_states = self.normalizer.normalize(self._current_states)
+        
+        # Build indices
+        self._current_indices = []
+        if self.mode == 'mlp':
+            for i in range(len(file_boundaries) - 1):
+                start, end = file_boundaries[i], file_boundaries[i + 1]
+                self._current_indices.extend(range(start, end - 1))
+        else:
+            for i in range(len(file_boundaries) - 1):
+                start, end = file_boundaries[i], file_boundaries[i + 1]
+                self._current_indices.extend(range(start, end - self.seq_len - 1))
+        
+        # Convert to tensor
+        self._states_tensor = torch.from_numpy(self._current_states).float()
+    
+    def __len__(self) -> int:
+        # Return estimated total samples based on average frames per file
+        if self._current_indices:
+            avg_samples_per_file = len(self._current_indices) / max(1, len(self._current_files))
+            return int(avg_samples_per_file * len(self.all_bvh_files))
+        return 0
+    
+    def __getitem__(self, idx: int):
+        # Refresh pool periodically
+        self._sample_counter += 1
+        if self._sample_counter >= self.refresh_every:
+            self._refresh_file_pool()
+            self._sample_counter = 0
+        
+        # Map global idx to current pool using modulo
+        local_idx = idx % len(self._current_indices)
+        start = self._current_indices[local_idx]
+        
+        if self.mode == 'mlp':
+            return self._states_tensor[start], self._states_tensor[start + 1]
+        elif self.mode == 'transformer':
+            return (self._states_tensor[start:start + self.seq_len],
+                    self._states_tensor[start + 1:start + self.seq_len + 1])
+        elif self.mode == 'autoregressive':
+            return (self._states_tensor[start:start + self.seq_len],
+                    self._states_tensor[start + self.seq_len])
+        raise ValueError(f"Unknown mode: {self.mode}")
+    
+    @property
+    def state_dim(self) -> int:
+        if self._current_states is not None:
+            return self._current_states.shape[1]
+        return 0
+    
+    def save_normalizer(self, filepath: str):
+        if self.normalizer:
+            self.normalizer.save(filepath)
+    
+    @property
+    def total_frames(self) -> int:
+        """Estimated total frames across all files."""
+        if self._current_states is not None and self._current_files:
+            avg_frames = len(self._current_states) / len(self._current_files)
+            return int(avg_frames * len(self.all_bvh_files))
+        return 0
+

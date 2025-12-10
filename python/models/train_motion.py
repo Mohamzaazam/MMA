@@ -96,7 +96,33 @@ def suppress_stdout(log_file=None):
     finally:
         os.dup2(saved_stdout, stdout_fd)
         os.close(saved_stdout)
-        devnull.close()
+
+
+class WeightedMotionLoss(nn.Module):
+    """
+    Weighted loss for motion prediction.
+    
+    Separately weights position and velocity components, with optional
+    smoothness regularization.
+    """
+    def __init__(self, state_dim=112, pos_weight=1.0, vel_weight=0.1, smooth_weight=0.01):
+        super().__init__()
+        self.pos_dims = state_dim // 2  # First half is position
+        self.pos_weight = pos_weight
+        self.vel_weight = vel_weight
+        self.smooth_weight = smooth_weight
+    
+    def forward(self, pred, target):
+        # Position loss (first half of state)
+        pos_loss = F.mse_loss(pred[:, :self.pos_dims], target[:, :self.pos_dims])
+        
+        # Velocity loss (second half of state)
+        vel_loss = F.mse_loss(pred[:, self.pos_dims:], target[:, self.pos_dims:])
+        
+        # Combined weighted loss
+        loss = self.pos_weight * pos_loss + self.vel_weight * vel_loss
+        
+        return loss, pos_loss.item(), vel_loss.item()
 
 
 # =============================================================================
@@ -109,11 +135,20 @@ def train_epoch(
     optimizer: optim.Optimizer,
     criterion: nn.Module,
     device: torch.device,
-) -> float:
-    """Train for one epoch."""
+) -> tuple:
+    """
+    Train for one epoch.
+    
+    Returns:
+        Tuple of (total_loss, pos_loss, vel_loss) if using WeightedMotionLoss,
+        otherwise (total_loss, None, None)
+    """
     model.train()
     total_loss = 0.0
+    total_pos_loss = 0.0
+    total_vel_loss = 0.0
     n_batches = 0
+    use_weighted = isinstance(criterion, WeightedMotionLoss)
     
     for batch in dataloader:
         x, y = batch
@@ -122,9 +157,10 @@ def train_epoch(
         optimizer.zero_grad()
         y_pred = model(x)
         
-        # Handle transformer_ar output shape
-        if model.mode == 'transformer_ar':
-            loss = criterion(y_pred, y)
+        if use_weighted:
+            loss, pos_loss, vel_loss = criterion(y_pred, y)
+            total_pos_loss += pos_loss
+            total_vel_loss += vel_loss
         else:
             loss = criterion(y_pred, y)
         
@@ -135,7 +171,10 @@ def train_epoch(
         total_loss += loss.item()
         n_batches += 1
     
-    return total_loss / max(n_batches, 1)
+    avg_loss = total_loss / max(n_batches, 1)
+    if use_weighted:
+        return avg_loss, total_pos_loss / max(n_batches, 1), total_vel_loss / max(n_batches, 1)
+    return avg_loss, None, None
 
 
 def validate(
@@ -161,6 +200,80 @@ def validate(
             n_batches += 1
     
     return total_loss / max(n_batches, 1)
+
+
+def validate_comprehensive(
+    model: MotionNN,
+    dataloader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+    state_dim: int = 112,
+) -> dict:
+    """
+    Extended validation with per-component metrics.
+    
+    Returns:
+        dict with total_loss, position_loss, velocity_loss, 
+        per-group losses, and correlation
+    """
+    model.eval()
+    
+    all_preds = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for batch in dataloader:
+            x, y = batch
+            x, y = x.to(device), y.to(device)
+            
+            y_pred = model(x)
+            
+            all_preds.append(y_pred.cpu())
+            all_targets.append(y.cpu())
+    
+    preds = torch.cat(all_preds, dim=0).numpy()
+    targets = torch.cat(all_targets, dim=0).numpy()
+    
+    # Compute losses
+    errors = preds - targets
+    squared_errors = errors ** 2
+    
+    # Position/velocity split (assume first half is position)
+    pos_dims = state_dim // 2
+    
+    result = {
+        'total_loss': float(np.mean(squared_errors)),
+        'position_loss': float(np.mean(squared_errors[:, :pos_dims])) if preds.shape[1] >= pos_dims else 0.0,
+        'velocity_loss': float(np.mean(squared_errors[:, pos_dims:])) if preds.shape[1] > pos_dims else 0.0,
+    }
+    
+    # Per-group losses (lower limb, upper limb, spine)
+    # Lower limb: dims 9-26 (hips, knees, ankles)
+    lower_limb_dims = list(range(9, min(27, preds.shape[1])))
+    if lower_limb_dims:
+        result['lower_limb_loss'] = float(np.mean(squared_errors[:, lower_limb_dims]))
+    
+    # Upper limb: dims 27-38 (shoulders, elbows)
+    upper_limb_dims = list(range(27, min(39, preds.shape[1])))
+    if upper_limb_dims:
+        result['upper_limb_loss'] = float(np.mean(squared_errors[:, upper_limb_dims]))
+    
+    # Spine: dims 6-8
+    spine_dims = list(range(6, min(9, preds.shape[1])))
+    if spine_dims:
+        result['spine_loss'] = float(np.mean(squared_errors[:, spine_dims]))
+    
+    # Correlation coefficient
+    try:
+        preds_flat = preds.flatten()
+        targets_flat = targets.flatten()
+        correlation = np.corrcoef(preds_flat, targets_flat)[0, 1]
+        result['correlation'] = float(correlation) if not np.isnan(correlation) else 0.0
+    except:
+        result['correlation'] = 0.0
+    
+    return result
+
 
 
 def evaluate_rollout_mse(
@@ -348,24 +461,48 @@ def train(args):
                 normalizer=train_dataset.normalizer
             )
     elif args.activity_split:
-        # Activity-stratified split: ensures activity overlap between train and val
-        from python.utils.cmu_categories import stratified_split, print_split_info
+        # Subject-disjoint activity split: no subject overlap between train/val/test
+        from python.utils.cmu_categories import (
+            subject_disjoint_activity_split, print_subject_disjoint_split_info
+        )
         
         # Find all BVH files
         bvh_dir = Path(args.bvh_dir)
         all_bvh = sorted([str(p) for p in bvh_dir.glob("**/*.bvh")])
         print(f"Found {len(all_bvh)} BVH files in {args.bvh_dir}")
         
-        # Use stratified split
-        train_files, val_files, split_info = stratified_split(
+        # Limit subjects if requested
+        if args.max_subjects:
+            import re
+            subject_files = {}
+            for f in all_bvh:
+                match = re.search(r'/(\d+)/\d+_\d+\.bvh$', f) or re.search(r'(\d+)_\d+\.bvh$', f)
+                if match:
+                    subject_id = int(match.group(1))
+                    if subject_id not in subject_files:
+                        subject_files[subject_id] = []
+                    subject_files[subject_id].append(f)
+            selected_subjects = sorted(subject_files.keys())[:args.max_subjects]
+            all_bvh = [f for s in selected_subjects for f in subject_files[s]]
+            print(f"Limited to {len(selected_subjects)} subjects, {len(all_bvh)} files")
+        
+        # Compute val_ratio from train_ratio
+        val_ratio = (1.0 - args.train_ratio - args.test_ratio) if args.test_ratio > 0 else (1.0 - args.train_ratio)
+        
+        # Determine save path
+        save_split_path = args.save_split if args.save_split else str(nn_dir / 'split_info.json')
+        
+        # Use subject-disjoint split
+        train_files, val_files, test_files, split_info = subject_disjoint_activity_split(
             all_bvh,
             args.bvh_dir,
             train_ratio=args.train_ratio,
-            seed=313,
-            max_files=args.max_subjects,  # Limit files per activity
+            val_ratio=val_ratio,
+            test_ratio=args.test_ratio,
+            seed=42,
+            save_split=save_split_path,
         )
-        print_split_info(split_info)
-        print(f"  Train files: {len(train_files)}, Val files: {len(val_files)}")
+        print_subject_disjoint_split_info(split_info)
         
         print("Loading datasets...")
         with suppress_stdout(str(log_file) if suppress_cpp_output else None):
@@ -425,7 +562,17 @@ def train(args):
     
     # Optimizer and loss
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    criterion = nn.MSELoss()
+    
+    if args.weighted_loss:
+        criterion = WeightedMotionLoss(
+            state_dim=train_dataset.state_dim,
+            pos_weight=args.pos_weight,
+            vel_weight=args.vel_weight,
+            smooth_weight=args.smooth_weight,
+        )
+        print(f"\nUsing weighted loss: pos={args.pos_weight}, vel={args.vel_weight}, smooth={args.smooth_weight}")
+    else:
+        criterion = nn.MSELoss()
     
     # Learning rate scheduler with warm restarts
     scheduler = get_scheduler(
@@ -444,7 +591,11 @@ def train(args):
     
     for epoch in range(1, args.epochs + 1):
         # Train
-        train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
+        train_result = train_epoch(model, train_loader, optimizer, criterion, device)
+        if isinstance(train_result, tuple):
+            train_loss, train_pos_loss, train_vel_loss = train_result
+        else:
+            train_loss, train_pos_loss, train_vel_loss = train_result, None, None
         
         # Step scheduler after each epoch
         scheduler.step()
@@ -457,6 +608,27 @@ def train(args):
         writer.add_scalar('train/loss', train_loss, epoch)
         writer.add_scalar('val/loss', val_loss, epoch)
         writer.add_scalar('train/lr', lr, epoch)
+        
+        # Log position/velocity losses if using weighted loss
+        if train_pos_loss is not None:
+            writer.add_scalar('train/pos_loss', train_pos_loss, epoch)
+            writer.add_scalar('train/vel_loss', train_vel_loss, epoch)
+        
+        # Comprehensive validation (less frequently - every 5 epochs)
+        if epoch % 5 == 0 or epoch == 1:
+            comp_val = validate_comprehensive(
+                model, val_loader, criterion, device, 
+                state_dim=train_dataset.state_dim
+            )
+            writer.add_scalar('val/position_loss', comp_val['position_loss'], epoch)
+            writer.add_scalar('val/velocity_loss', comp_val['velocity_loss'], epoch)
+            writer.add_scalar('val/correlation', comp_val['correlation'], epoch)
+            if 'lower_limb_loss' in comp_val:
+                writer.add_scalar('val/lower_limb_loss', comp_val['lower_limb_loss'], epoch)
+            if 'upper_limb_loss' in comp_val:
+                writer.add_scalar('val/upper_limb_loss', comp_val['upper_limb_loss'], epoch)
+            if 'spine_loss' in comp_val:
+                writer.add_scalar('val/spine_loss', comp_val['spine_loss'], epoch)
         
         # Rollout evaluation (less frequently)
         if epoch % args.rollout_freq == 0:
@@ -505,10 +677,14 @@ def main():
                         help='Train/val split ratio')
     parser.add_argument('--subject_split', action='store_true',
                         help='Use subject-based splitting')
-    parser.add_argument('--max_subjects', type=int, default=10,
+    parser.add_argument('--max_subjects', type=int, default=100,
                         help='Max number of subjects to use (for testing)')
     parser.add_argument('--activity_split', action='store_true',
-                        help='Use activity-stratified splitting (ensures activity overlap)')
+                        help='Use subject-disjoint activity split (no subject overlap)')
+    parser.add_argument('--test_ratio', type=float, default=0.15,
+                        help='Ratio of subjects to hold out for testing')
+    parser.add_argument('--save_split', type=str, default=None,
+                        help='Path to save train/val/test split JSON')
     
     # Model
     parser.add_argument('--mode', type=str, default='mlp',
@@ -536,6 +712,16 @@ def main():
                         help='Weight decay')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='DataLoader workers')
+    
+    # Loss weighting
+    parser.add_argument('--weighted_loss', action='store_true',
+                        help='Use weighted position/velocity loss')
+    parser.add_argument('--pos_weight', type=float, default=1.0,
+                        help='Weight for position loss')
+    parser.add_argument('--vel_weight', type=float, default=0.1,
+                        help='Weight for velocity loss')
+    parser.add_argument('--smooth_weight', type=float, default=0.01,
+                        help='Weight for smoothness regularization')
     
     # Logging
     parser.add_argument('--nn_dir', type=str, default='nn',
