@@ -18,7 +18,7 @@ import sys
 sys.path.append('.')
 
 from python.models.motion_nn import MotionNN
-from python.utils.bvh_dataset import BVHDataset, StateNormalizer
+from python.utils.datasets import BVHDataset, ExtractedBVHDataset, StateNormalizer
 
 
 def load_model_and_normalizer(model_path: str, normalizer_path: str = None):
@@ -692,8 +692,23 @@ def main():
                         help='Evaluate on test set from split file')
     parser.add_argument('--use_val_set', action='store_true',
                         help='Evaluate on validation set from split file')
+    parser.add_argument('--verbose', action='store_true',
+                        help='Show C++ BVH parsing output (default: redirect to log file)')
     
     args = parser.parse_args()
+
+    suppress_cpp_output = not args.verbose
+    if suppress_cpp_output:
+        log_file = 'eval_results/eval_bvh_parse.log'
+        print(f"C++ logs will be redirected to: {log_file}")
+        # Actually suppress C++ output
+        try:
+            import sys
+            sys.path.insert(0, str(Path(args.build_dir).absolute()))
+            import pymss
+            pymss.set_verbose(False)
+        except ImportError:
+            pass
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -714,9 +729,9 @@ def main():
     # Determine dataset mode
     if model.mode == 'mlp':
         dataset_mode = 'mlp'
-    elif model.mode == 'transformer_reg':
+    elif model.mode in ('encoder', 'transformer_reg'):  # Handle legacy
         dataset_mode = 'autoregressive'
-    else:
+    else:  # seq2seq / transformer_ar
         dataset_mode = 'transformer'
     
     # Load dataset - from split file or directly
@@ -745,14 +760,26 @@ def main():
         bvh_files = list(Path(args.bvh_dir).glob('**/*.bvh'))
         bvh_files = [str(f) for f in bvh_files[:10]]  # Limit for eval
     
-    print(f"\nLoading {len(bvh_files)} BVH files...")
-    dataset = BVHDataset(
-        bvh_files, 
-        mode=dataset_mode, 
-        seq_len=model.seq_len if hasattr(model, 'seq_len') else 32,
-        build_dir=args.build_dir,
-        normalizer=normalizer
-    )
+    print(f"\nLoading {len(bvh_files)} files...")
+    
+    # Auto-detect file type and use appropriate dataset
+    if bvh_files and bvh_files[0].endswith('.npz'):
+        print("Detected NPZ files, using ExtractedBVHDataset...")
+        dataset = ExtractedBVHDataset(
+            bvh_files,
+            mode=dataset_mode,
+            seq_len=model.seq_len if hasattr(model, 'seq_len') else 32,
+            normalizer=normalizer,
+        )
+    else:
+        print("Using BVHDataset for BVH files...")
+        dataset = BVHDataset(
+            bvh_files, 
+            mode=dataset_mode, 
+            seq_len=model.seq_len if hasattr(model, 'seq_len') else 32,
+            build_dir=args.build_dir,
+            normalizer=normalizer
+        )
     print(f"Dataset: {len(dataset)} samples")
     
     # Create output directory

@@ -15,6 +15,7 @@ from datetime import datetime
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -25,9 +26,8 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from python.models.motion_nn import MotionNN
-from python.utils.bvh_dataset import (
-    BVHDataset, train_val_split, subject_split, StateNormalizer
-)
+from python.utils.normalization import StateNormalizer
+from python.utils.datasets import BVHDataset, ExtractedBVHDataset
 
 
 # =============================================================================
@@ -79,23 +79,19 @@ from contextlib import contextmanager
 @contextmanager
 def suppress_stdout(log_file=None):
     """Context manager to redirect stdout to a file or /dev/null."""
-    import sys
-    import os
-    
     stdout_fd = sys.stdout.fileno()
     saved_stdout = os.dup(stdout_fd)
     
-    if log_file:
-        devnull = open(log_file, 'a')
-    else:
-        devnull = open(os.devnull, 'w')
-    
-    os.dup2(devnull.fileno(), stdout_fd)
+    redirect_file = open(log_file, 'a') if log_file else open(os.devnull, 'w')
     try:
-        yield
+        os.dup2(redirect_file.fileno(), stdout_fd)
+        try:
+            yield
+        finally:
+            os.dup2(saved_stdout, stdout_fd)
+            os.close(saved_stdout)
     finally:
-        os.dup2(saved_stdout, stdout_fd)
-        os.close(saved_stdout)
+        redirect_file.close()
 
 
 class WeightedMotionLoss(nn.Module):
@@ -135,9 +131,17 @@ def train_epoch(
     optimizer: optim.Optimizer,
     criterion: nn.Module,
     device: torch.device,
+    multistep_ratio: float = 0.3,
+    max_horizon: int = 16,
+    min_horizon: int = 1,
 ) -> tuple:
     """
-    Train for one epoch.
+    Train for one epoch with adaptive multi-step horizon.
+    
+    Args:
+        multistep_ratio: Fraction of batches to use multi-step loss
+        max_horizon: Maximum rollout steps (must match dataset max_horizon)
+        min_horizon: Minimum rollout steps when using multi-step
     
     Returns:
         Tuple of (total_loss, pos_loss, vel_loss) if using WeightedMotionLoss,
@@ -151,18 +155,88 @@ def train_epoch(
     use_weighted = isinstance(criterion, WeightedMotionLoss)
     
     for batch in dataloader:
-        x, y = batch
-        x, y = x.to(device), y.to(device)
+        x, targets = batch
+        x = x.to(device).float()  # Ensure float32
+        
+        # Check if we have multi-step targets (3D tensor for MLP, 4D for transformer)
+        is_multistep_data = len(targets.shape) > len(x.shape)
         
         optimizer.zero_grad()
-        y_pred = model(x)
         
-        if use_weighted:
-            loss, pos_loss, vel_loss = criterion(y_pred, y)
-            total_pos_loss += pos_loss
-            total_vel_loss += vel_loss
+        # Decide whether to use multi-step for this batch
+        use_multistep = (torch.rand(1).item() < multistep_ratio) and is_multistep_data
+        
+        if use_multistep:
+            targets = targets.to(device).float()  # Ensure float32
+            
+            # Get available horizon from data
+            if model.mode == 'mlp':
+                available_horizon = targets.shape[1]  # (batch, horizon, state_dim)
+            elif model.mode == 'autoregressive':
+                available_horizon = targets.shape[1]  # (batch, horizon, state_dim)
+            else:  # transformer
+                available_horizon = targets.shape[2]  # (batch, seq_len, horizon, state_dim)
+            
+            # Adaptively select horizon for this batch
+            horizon = torch.randint(min_horizon, min(max_horizon, available_horizon) + 1, (1,)).item()
+            
+            # Rollout and compute loss against ground truth
+            loss = 0.0
+            current = x
+            
+            for step in range(horizon):
+                pred = model(current)
+                
+                # Get ground truth for this step
+                if model.mode == 'mlp':
+                    gt = targets[:, step, :]
+                elif model.mode == 'autoregressive':
+                    gt = targets[:, step, :]
+                else:  # transformer
+                    gt = targets[:, :, step, :]  # (batch, seq_len, state_dim)
+                
+                # Decaying weight: recent steps matter more
+                weight = 1.0 / (step + 1)
+                
+                if use_weighted:
+                    step_loss, _, _ = criterion(pred, gt)
+                else:
+                    step_loss = F.mse_loss(pred, gt)
+                
+                loss = loss + weight * step_loss
+                
+                # Update input for next step (autoregressive rollout)
+                if model.mode == 'mlp':
+                    current = pred.detach()
+                else:
+                    # Transformer: shift sequence and append prediction
+                    if len(pred.shape) == 2:
+                        pred = pred.unsqueeze(1)
+                    current = torch.cat([current[:, 1:], pred.detach()], dim=1)
+            
+            # Normalize by sum of weights
+            weight_sum = sum(1.0 / (s + 1) for s in range(horizon))
+            loss = loss / weight_sum
+            
         else:
-            loss = criterion(y_pred, y)
+            # Standard single-step training
+            if is_multistep_data:
+                # Extract first target from multi-step data
+                if model.mode in ('mlp', 'autoregressive'):
+                    y = targets[:, 0, :].to(device).float() if len(targets.shape) == 3 else targets[:, 0].to(device).float()
+                else:  # transformer
+                    y = targets[:, :, 0, :].to(device).float() if len(targets.shape) == 4 else targets[:, :, 0].to(device).float()
+            else:
+                y = targets.to(device).float()
+            
+            y_pred = model(x)
+            
+            if use_weighted:
+                loss, pos_loss, vel_loss = criterion(y_pred, y)
+                total_pos_loss += pos_loss
+                total_vel_loss += vel_loss
+            else:
+                loss = criterion(y_pred, y)
         
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -183,18 +257,29 @@ def validate(
     criterion: nn.Module,
     device: torch.device,
 ) -> float:
-    """Validate the model."""
+    """Validate the model (single-step loss only)."""
     model.eval()
     total_loss = 0.0
     n_batches = 0
+    use_weighted = isinstance(criterion, WeightedMotionLoss)
     
     with torch.no_grad():
         for batch in dataloader:
-            x, y = batch
-            x, y = x.to(device), y.to(device)
+            x, targets = batch
+            x = x.to(device).float()
+            
+            # Handle multi-step targets: extract first frame only
+            if len(targets.shape) > len(x.shape):
+                if model.mode in ('mlp', 'autoregressive', 'encoder'):
+                    y = targets[:, 0, :].to(device).float()
+                else:  # transformer/seq2seq
+                    y = targets[:, :, 0, :].to(device).float()
+            else:
+                y = targets.to(device).float()
             
             y_pred = model(x)
-            loss = criterion(y_pred, y)
+            result = criterion(y_pred, y)
+            loss = result[0] if use_weighted else result
             
             total_loss += loss.item()
             n_batches += 1
@@ -223,8 +308,17 @@ def validate_comprehensive(
     
     with torch.no_grad():
         for batch in dataloader:
-            x, y = batch
-            x, y = x.to(device), y.to(device)
+            x, targets = batch
+            x = x.to(device).float()
+            
+            # Handle multi-step targets: extract first frame only
+            if len(targets.shape) > len(x.shape):
+                if model.mode in ('mlp', 'autoregressive', 'encoder'):
+                    y = targets[:, 0, :].to(device).float()
+                else:  # transformer/seq2seq
+                    y = targets[:, :, 0, :].to(device).float()
+            else:
+                y = targets.to(device).float()
             
             y_pred = model(x)
             
@@ -324,6 +418,10 @@ def train(args):
     device = get_device()
     print(f"Using device: {device}")
     
+    # Enable TensorFloat32 for faster matmul on modern GPUs
+    if device.type == 'cuda':
+        torch.set_float32_matmul_precision('high')
+    
     # Setup output directories
     nn_dir = Path(args.nn_dir)
     nn_dir.mkdir(parents=True, exist_ok=True)
@@ -342,187 +440,74 @@ def train(args):
     print(f"TensorBoard logs: {log_dir}")
     
     # Load data
-    print("\nLoading BVH data...")
-    if args.bvh_files:
-        bvh_files = args.bvh_files
-        print(f"Using {len(bvh_files)} specified BVH files")
-    elif args.subject_split:
-        # subject_split handles its own file discovery
-        bvh_files = None  # Will be handled in subject_split branch
-        print(f"Using subject-based split from {args.bvh_dir}")
-    else:
-        bvh_dir = Path(args.bvh_dir)
-        bvh_files = sorted([str(f) for f in bvh_dir.glob("**/*.bvh")])
-        if not bvh_files:
-            print(f"ERROR: No BVH files found in {args.bvh_dir}")
-            return
-        print(f"Found {len(bvh_files)} BVH files")
+    print("\nLoading extracted NPZ data...")
     
     # Determine mode for dataset
     # - mlp: (state, next_state)
-    # - transformer_reg: (sequence, next_single_frame) -> 'autoregressive'
-    # - transformer_ar: (sequence, next_sequence) -> 'transformer'
+    # - encoder: (sequence, next_single_frame) -> 'autoregressive'
+    # - seq2seq: (sequence, next_sequence) -> 'transformer'
     if args.mode == 'mlp':
         dataset_mode = 'mlp'
-    elif args.mode == 'transformer_reg':
+    elif args.mode == 'encoder':
         dataset_mode = 'autoregressive'  # seq -> single frame
-    else:  # transformer_ar
+    else:  # seq2seq
         dataset_mode = 'transformer'  # seq -> seq
     
-    # Create datasets
-    if args.bvh_files:
-        # Use specified files directly
-        import random
-        random.seed(42)
-        shuffled = list(bvh_files)
-        random.shuffle(shuffled)
-        split_idx = int(len(shuffled) * args.train_ratio)
-        train_files = shuffled[:split_idx] if split_idx > 0 else shuffled
-        val_files = shuffled[split_idx:] if split_idx < len(shuffled) else shuffled[-1:]
-        
-        print(f"Train files: {len(train_files)}, Val files: {len(val_files)}")
-        
-        # Verify no overlap (data leakage check)
-        overlap = set(train_files) & set(val_files)
-        if overlap:
-            print(f"WARNING: Data leakage detected! {len(overlap)} files in both train and val")
-        else:
-            print("✓ No data leakage: train and val files are disjoint")
-        
-        print("Loading datasets...")
-        with suppress_stdout(str(log_file) if suppress_cpp_output else None):
-            train_dataset = BVHDataset(
-                train_files, mode=dataset_mode, seq_len=args.seq_len, build_dir=args.build_dir
-            )
-            val_dataset = BVHDataset(
-                val_files, mode=dataset_mode, seq_len=args.seq_len, build_dir=args.build_dir,
-                normalizer=train_dataset.normalizer
-            )
-    elif args.subject_split:
-        # Use subject-based split with optional max_subjects
-        from python.utils.bvh_dataset import subject_split as do_subject_split
+    # Use pre-extracted NPZ files for fast training
+    from python.utils.splits import (
+        subject_disjoint_activity_split, print_subject_disjoint_split_info
+    )
+    
+    # Find all NPZ files
+    extracted_path = Path(args.extracted_dir)
+    all_npz = sorted([str(p) for p in extracted_path.glob("**/*.npz")])
+    print(f"Found {len(all_npz)} extracted NPZ files in {args.extracted_dir}")
+    
+    if not all_npz:
+        print("ERROR: No NPZ files found. Run extraction first:")
+        print(f"  pixi run python scripts/extract_states.py --bvh_dir {args.bvh_root} --output_dir {args.extracted_dir}")
+        return
+    
+    # Limit subjects if requested
+    if args.max_subjects:
         import re
-        
-        # Find all BVH files
-        bvh_dir = Path(args.bvh_dir)
-        all_bvh = sorted([str(p) for p in bvh_dir.glob("**/*.bvh")])
-        print(f"Found {len(all_bvh)} BVH files in {args.bvh_dir}")
-        
-        # Group by subject
         subject_files = {}
-        for f in all_bvh:
-            match = re.search(r'/(\d+)/\d+_\d+\.bvh$', f) or re.search(r'(\d+)_\d+\.bvh$', f)
+        for f in all_npz:
+            match = re.search(r'/(\d+)/\d+_\d+\.npz$', f) or re.search(r'(\d+)_\d+\.npz$', f)
             if match:
                 subject_id = int(match.group(1))
                 if subject_id not in subject_files:
                     subject_files[subject_id] = []
                 subject_files[subject_id].append(f)
-        
-        all_subjects = sorted(subject_files.keys())
-        print(f"Found {len(all_subjects)} subjects")
-        
-        # Limit subjects if specified
-        if args.max_subjects and args.max_subjects < len(all_subjects):
-            all_subjects = all_subjects[:args.max_subjects]
-            print(f"Limited to {len(all_subjects)} subjects")
-        
-        # Split subjects
-        import random
-        random.seed(42)
-        shuffled = list(all_subjects)
-        random.shuffle(shuffled)
-        split_idx = int(len(shuffled) * args.train_ratio)
-        train_subjects = shuffled[:split_idx]
-        val_subjects = shuffled[split_idx:]
-        
-        # Verify no overlap
-        overlap = set(train_subjects) & set(val_subjects)
-        print(f"\n✓ No data leakage: subjects are disjoint")
-        print(f"  Train subjects ({len(train_subjects)}): {sorted(train_subjects)}")
-        print(f"  Val subjects ({len(val_subjects)}): {sorted(val_subjects)}")
-        
-        # Collect files
-        train_files = []
-        val_files = []
-        for s in train_subjects:
-            train_files.extend(subject_files.get(s, []))
-        for s in val_subjects:
-            val_files.extend(subject_files.get(s, []))
-        
-        print(f"  Train files: {len(train_files)}, Val files: {len(val_files)}")
-        
-        print("Loading datasets...")
-        with suppress_stdout(str(log_file) if suppress_cpp_output else None):
-            train_dataset = BVHDataset(
-                train_files, mode=dataset_mode, seq_len=args.seq_len, build_dir=args.build_dir
-            )
-            val_dataset = BVHDataset(
-                val_files, mode=dataset_mode, seq_len=args.seq_len, build_dir=args.build_dir,
-                normalizer=train_dataset.normalizer
-            )
-    elif args.activity_split:
-        # Subject-disjoint activity split: no subject overlap between train/val/test
-        from python.utils.cmu_categories import (
-            subject_disjoint_activity_split, print_subject_disjoint_split_info
-        )
-        
-        # Find all BVH files
-        bvh_dir = Path(args.bvh_dir)
-        all_bvh = sorted([str(p) for p in bvh_dir.glob("**/*.bvh")])
-        print(f"Found {len(all_bvh)} BVH files in {args.bvh_dir}")
-        
-        # Limit subjects if requested
-        if args.max_subjects:
-            import re
-            subject_files = {}
-            for f in all_bvh:
-                match = re.search(r'/(\d+)/\d+_\d+\.bvh$', f) or re.search(r'(\d+)_\d+\.bvh$', f)
-                if match:
-                    subject_id = int(match.group(1))
-                    if subject_id not in subject_files:
-                        subject_files[subject_id] = []
-                    subject_files[subject_id].append(f)
-            selected_subjects = sorted(subject_files.keys())[:args.max_subjects]
-            all_bvh = [f for s in selected_subjects for f in subject_files[s]]
-            print(f"Limited to {len(selected_subjects)} subjects, {len(all_bvh)} files")
-        
-        # Compute val_ratio from train_ratio
-        val_ratio = (1.0 - args.train_ratio - args.test_ratio) if args.test_ratio > 0 else (1.0 - args.train_ratio)
-        
-        # Determine save path
-        save_split_path = args.save_split if args.save_split else str(nn_dir / 'split_info.json')
-        
-        # Use subject-disjoint split
-        train_files, val_files, test_files, split_info = subject_disjoint_activity_split(
-            all_bvh,
-            args.bvh_dir,
-            train_ratio=args.train_ratio,
-            val_ratio=val_ratio,
-            test_ratio=args.test_ratio,
-            seed=42,
-            save_split=save_split_path,
-        )
-        print_subject_disjoint_split_info(split_info)
-        
-        print("Loading datasets...")
-        with suppress_stdout(str(log_file) if suppress_cpp_output else None):
-            train_dataset = BVHDataset(
-                train_files, mode=dataset_mode, seq_len=args.seq_len, build_dir=args.build_dir
-            )
-            val_dataset = BVHDataset(
-                val_files, mode=dataset_mode, seq_len=args.seq_len, build_dir=args.build_dir,
-                normalizer=train_dataset.normalizer
-            )
-    else:
-        print("Loading datasets...")
-        with suppress_stdout(str(log_file) if suppress_cpp_output else None):
-            train_dataset, val_dataset = train_val_split(
-                args.bvh_dir,
-                mode=dataset_mode,
-                seq_len=args.seq_len,
-                train_ratio=args.train_ratio,
-                build_dir=args.build_dir,
-            )
+        selected_subjects = sorted(subject_files.keys())[:args.max_subjects]
+        all_npz = [f for s in selected_subjects for f in subject_files[s]]
+        print(f"Limited to {len(selected_subjects)} subjects, {len(all_npz)} files")
+    
+    # Apply subject-disjoint split (works on NPZ paths just like BVH)
+    val_ratio = (1.0 - args.train_ratio - args.test_ratio) if args.test_ratio > 0 else (1.0 - args.train_ratio)
+    save_split_path = args.save_split if args.save_split else str(nn_dir / 'split_info.json')
+    
+    train_files, val_files, test_files, split_info = subject_disjoint_activity_split(
+        all_npz,
+        cmu_dir=args.bvh_root,  # Use original BVH root for subject/activity info
+        train_ratio=args.train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=args.test_ratio,
+        seed=42,
+        save_split=save_split_path,
+    )
+    print_subject_disjoint_split_info(split_info)
+    
+    print("Loading pre-extracted datasets (fast mode)...")
+    train_dataset = ExtractedBVHDataset(
+        train_files, mode=dataset_mode, seq_len=args.seq_len,
+        max_horizon=args.max_horizon
+    )
+    val_dataset = ExtractedBVHDataset(
+        val_files, mode=dataset_mode, seq_len=args.seq_len,
+        max_horizon=args.max_horizon,
+        normalizer=train_dataset.normalizer
+    )
     
     print(f"Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples")
     print(f"State dim: {train_dataset.state_dim}")
@@ -560,6 +545,11 @@ def train(args):
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  Parameters: {n_params:,}")
     
+    # Compile model for faster training (PyTorch 2.0+)
+    if args.compile and hasattr(torch, 'compile') and device.type == 'cuda':
+        print("  Compiling model with torch.compile()...")
+        model = torch.compile(model)
+    
     # Optimizer and loss
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
@@ -591,7 +581,12 @@ def train(args):
     
     for epoch in range(1, args.epochs + 1):
         # Train
-        train_result = train_epoch(model, train_loader, optimizer, criterion, device)
+        train_result = train_epoch(
+            model, train_loader, optimizer, criterion, device,
+            multistep_ratio=args.multistep_ratio,
+            max_horizon=args.max_horizon,
+            min_horizon=args.min_horizon,
+        )
         if isinstance(train_result, tuple):
             train_loss, train_pos_loss, train_vel_loss = train_result
         else:
@@ -667,29 +662,26 @@ def main():
     parser = argparse.ArgumentParser(description='Train MotionNN motion prediction model')
     
     # Data
-    parser.add_argument('--bvh_dir', type=str, default='data/motion',
-                        help='Directory containing BVH files')
-    parser.add_argument('--bvh_files', type=str, nargs='+', default=None,
-                        help='Specific BVH files to use (overrides bvh_dir)')
+    parser.add_argument('--extracted_dir', type=str, required=True,
+                        help='Directory with pre-extracted NPZ files (from scripts/extract_states.py)')
+    parser.add_argument('--bvh_root', type=str, default='data/cmu',
+                        help='Root of original BVH files (for error messages)')
     parser.add_argument('--build_dir', type=str, default='build',
                         help='Build directory for pymss')
-    parser.add_argument('--train_ratio', type=float, default=0.8,
+    parser.add_argument('--train_ratio', type=float, default=0.7,
                         help='Train/val split ratio')
-    parser.add_argument('--subject_split', action='store_true',
-                        help='Use subject-based splitting')
     parser.add_argument('--max_subjects', type=int, default=100,
                         help='Max number of subjects to use (for testing)')
-    parser.add_argument('--activity_split', action='store_true',
-                        help='Use subject-disjoint activity split (no subject overlap)')
     parser.add_argument('--test_ratio', type=float, default=0.15,
                         help='Ratio of subjects to hold out for testing')
-    parser.add_argument('--save_split', type=str, default=None,
+    parser.add_argument('--save_split', type=str, default='data/split.json',
                         help='Path to save train/val/test split JSON')
+    
     
     # Model
     parser.add_argument('--mode', type=str, default='mlp',
-                        choices=['mlp', 'transformer_reg', 'transformer_ar'],
-                        help='Model mode')
+                        choices=['mlp', 'encoder', 'seq2seq'],
+                        help='Model mode: mlp, encoder (seq→frame), seq2seq (seq→seq)')
     parser.add_argument('--hidden_dim', type=int, default=256,
                         help='Hidden dimension')
     parser.add_argument('--n_layers', type=int, default=3,
@@ -704,7 +696,7 @@ def main():
     # Training
     parser.add_argument('--epochs', type=int, default=100,
                         help='Number of epochs')
-    parser.add_argument('--batch_size', type=int, default=256,
+    parser.add_argument('--batch_size', type=int, default=1024,
                         help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-4,
                         help='Learning rate')
@@ -718,10 +710,22 @@ def main():
                         help='Use weighted position/velocity loss')
     parser.add_argument('--pos_weight', type=float, default=1.0,
                         help='Weight for position loss')
-    parser.add_argument('--vel_weight', type=float, default=0.1,
+    parser.add_argument('--vel_weight', type=float, default=1.0,
                         help='Weight for velocity loss')
-    parser.add_argument('--smooth_weight', type=float, default=0.01,
+    parser.add_argument('--smooth_weight', type=float, default=0.00,
                         help='Weight for smoothness regularization')
+    
+    # Multi-step training
+    parser.add_argument('--multistep_ratio', type=float, default=0.3,
+                        help='Fraction of batches using multi-step loss (default 0.3)')
+    parser.add_argument('--max_horizon', type=int, default=1,
+                        help='Max horizon for multi-step training (1=single-step, >1=multi-step)')
+    parser.add_argument('--min_horizon', type=int, default=1,
+                        help='Min horizon when using multi-step training')
+    
+    # Performance
+    parser.add_argument('--compile', action='store_true',
+                        help='Use torch.compile() for faster training (may cause OOM)')
     
     # Logging
     parser.add_argument('--nn_dir', type=str, default='nn',

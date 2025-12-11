@@ -1,4 +1,5 @@
 #include "BVH.h"
+#include "Verbose.h"
 #include <iostream>
 #include <cstdarg>
 #include <algorithm>
@@ -620,9 +621,11 @@ bool BVH::Parse(const std::string& file, std::string& errMsg, bool cyclic)
         }
     }
     
-    std::cout << "INFO: Parsed '" << file << "' successfully (" 
-              << mNodes.size() << " joints, " 
-              << mNumTotalFrames << " frames)" << std::endl;
+    if (gVerbose) {
+        std::cout << "INFO: Parsed '" << file << "' successfully (" 
+                  << mNodes.size() << " joints, " 
+                  << mNumTotalFrames << " frames)" << std::endl;
+    }
     
     errMsg.clear();
     return true;

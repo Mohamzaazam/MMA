@@ -54,6 +54,7 @@ public:
 	double GetBVHMaxTime();
 	Eigen::VectorXd GetTargetPositions(double t);
 	std::pair<Eigen::VectorXd, Eigen::VectorXd> GetTargetPosAndVel(double t);
+	bool ReloadBVH(const std::string& path, bool cyclic = false);
 private:
 	std::vector<MASS::Environment*> mEnvs;
 

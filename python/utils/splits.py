@@ -1,12 +1,18 @@
+#!/usr/bin/env python3
 """
-CMU Mocap Activity Categories.
+Data Splitting Utilities for CMU Mocap Dataset.
 
-Dynamically loads activity categories from trials.txt files in CMU subject directories.
-Supports trial-level activity splitting for balanced train/val sets.
+Provides:
+- subject_disjoint_activity_split: Split by subject with activity coverage reporting
+- load_trial_info: Load trial descriptions from CMU trials.txt files
+- infer_activity: Infer activity category from description
 """
 
 import re
+import json
+import random
 from pathlib import Path
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 
@@ -42,14 +48,12 @@ def load_trial_info(cmu_dir: str) -> Dict[str, Dict]:
             with open(trials_file, 'r') as f:
                 content = f.read()
             
-            # Parse trials: trial_id: description
             for match in re.finditer(r'(\d+_\d+):\s*(.+)', content):
                 trial_id, desc = match.groups()
                 trial_descriptions[trial_id] = desc.strip()
         
-        # Process BVH files
         for bvh_file in subject_dir.glob('*.bvh'):
-            trial_id = bvh_file.stem  # e.g., "16_01"
+            trial_id = bvh_file.stem
             description = trial_descriptions.get(trial_id, 'unknown')
             activity = infer_activity(description)
             
@@ -67,7 +71,6 @@ def infer_activity(description: str) -> str:
     """Infer activity category from trial description."""
     desc_lower = description.lower()
     
-    # Priority order matters - check more specific patterns first
     patterns = {
         'walk': ['walk', 'stroll', 'stride', 'step', 'march', 'pace'],
         'run': ['run', 'jog', 'sprint', 'dash'],
@@ -113,104 +116,6 @@ def get_activity_files(cmu_dir: str) -> Dict[str, List[str]]:
     return dict(activity_files)
 
 
-def activity_stratified_split(
-    bvh_files: List[str],
-    cmu_dir: str,
-    train_ratio: float = 0.8,
-    seed: int = 42,
-    max_files: Optional[int] = None,
-    min_activity_files: int = 2,
-) -> Tuple[List[str], List[str], Dict]:
-    """
-    Split files by activity category, ensuring each activity
-    is represented in both train and val sets.
-    
-    NOTE: This may have subject overlap between train/val.
-    For no-subject-overlap, use subject_split() instead.
-    
-    Args:
-        bvh_files: List of BVH file paths
-        cmu_dir: CMU data directory
-        train_ratio: Ratio for train split
-        seed: Random seed
-        max_files: Max files per activity (for testing)
-        min_activity_files: Min files needed for an activity to be included
-        
-    Returns:
-        (train_files, val_files, split_info)
-    """
-    import random
-    random.seed(seed)
-    
-    # Load trial info
-    all_trials = load_trial_info(cmu_dir)
-    
-    # Filter to requested files and group by activity
-    activity_files = defaultdict(list)
-    for f in bvh_files:
-        if f in all_trials:
-            activity = all_trials[f]['activity']
-            activity_files[activity].append(f)
-        else:
-            activity_files['general'].append(f)
-    
-    # Filter activities with too few files
-    valid_activities = {
-        act: files for act, files in activity_files.items()
-        if len(files) >= min_activity_files
-    }
-    
-    print(f"Found {len(valid_activities)} activities with >= {min_activity_files} files")
-    
-    # Split each activity
-    train_files = []
-    val_files = []
-    activity_distribution = {}
-    
-    for activity, files in sorted(valid_activities.items()):
-        random.shuffle(files)
-        
-        # Limit files if requested
-        if max_files:
-            files = files[:max_files]
-        
-        # Split ensuring at least 1 in each set
-        n = len(files)
-        n_train = max(1, int(n * train_ratio))
-        n_train = min(n_train, n - 1) if n > 1 else n  # Leave at least 1 for val
-        
-        train_files.extend(files[:n_train])
-        val_files.extend(files[n_train:])
-        
-        activity_distribution[activity] = {
-            'total': n,
-            'train': n_train,
-            'val': n - n_train,
-        }
-    
-    # Build split info
-    train_activities = set()
-    val_activities = set()
-    for f in train_files:
-        if f in all_trials:
-            train_activities.add(all_trials[f]['activity'])
-    for f in val_files:
-        if f in all_trials:
-            val_activities.add(all_trials[f]['activity'])
-    
-    split_info = {
-        'train_files': len(train_files),
-        'val_files': len(val_files),
-        'activities': list(activity_distribution.keys()),
-        'activity_distribution': activity_distribution,
-        'train_activities': sorted(train_activities),
-        'val_activities': sorted(val_activities),
-        'activity_overlap': sorted(train_activities & val_activities),
-    }
-    
-    return train_files, val_files, split_info
-
-
 def subject_disjoint_activity_split(
     bvh_files: List[str],
     cmu_dir: str,
@@ -227,8 +132,8 @@ def subject_disjoint_activity_split(
     appear in val or test.
     
     Args:
-        bvh_files: List of BVH file paths
-        cmu_dir: CMU data directory
+        bvh_files: List of BVH/NPZ file paths
+        cmu_dir: CMU data directory (for trial info lookup)
         train_ratio: Ratio of subjects for training (default 0.7)
         val_ratio: Ratio of subjects for validation (default 0.15)
         test_ratio: Ratio of subjects for testing (default 0.15)
@@ -238,10 +143,6 @@ def subject_disjoint_activity_split(
     Returns:
         (train_files, val_files, test_files, split_info)
     """
-    import random
-    import json
-    from datetime import datetime
-    
     random.seed(seed)
     
     # Validate ratios
@@ -255,15 +156,24 @@ def subject_disjoint_activity_split(
     # Load trial info
     all_trials = load_trial_info(cmu_dir)
     
+    # Helper to convert NPZ path to BVH path for lookup
+    def to_bvh_key(filepath: str) -> str:
+        """Convert NPZ path to BVH path for trial info lookup."""
+        match = re.search(r'(\d+)/(\d+_\d+)\.(bvh|npz)$', filepath)
+        if match:
+            subject, trial, _ = match.groups()
+            return str(Path(cmu_dir) / subject / f"{trial}.bvh")
+        return filepath
+    
     # Group files by subject
     subject_files: Dict[int, List[str]] = defaultdict(list)
     for f in bvh_files:
-        if f in all_trials:
-            subject_id = all_trials[f]['subject']
+        bvh_key = to_bvh_key(f)
+        if bvh_key in all_trials:
+            subject_id = all_trials[bvh_key]['subject']
             subject_files[subject_id].append(f)
         else:
-            # Try to extract subject from filename
-            match = re.search(r'/(\d+)/\d+_\d+\.bvh$', f) or re.search(r'(\d+)_\d+\.bvh$', f)
+            match = re.search(r'/(\d+)/\d+_\d+\.(bvh|npz)$', f) or re.search(r'(\d+)_\d+\.(bvh|npz)$', f)
             if match:
                 subject_id = int(match.group(1))
                 subject_files[subject_id].append(f)
@@ -290,32 +200,22 @@ def subject_disjoint_activity_split(
     test_subjects = all_subjects[n_train + n_val:]
     
     # Verify no overlap
-    train_set = set(train_subjects)
-    val_set = set(val_subjects)
-    test_set = set(test_subjects)
-    
-    assert not (train_set & val_set), "Train/val subject overlap!"
-    assert not (train_set & test_set), "Train/test subject overlap!"
-    assert not (val_set & test_set), "Val/test subject overlap!"
+    assert not (set(train_subjects) & set(val_subjects)), "Train/val subject overlap!"
+    assert not (set(train_subjects) & set(test_subjects)), "Train/test subject overlap!"
+    assert not (set(val_subjects) & set(test_subjects)), "Val/test subject overlap!"
     
     # Collect files for each split
-    train_files = []
-    val_files = []
-    test_files = []
-    
-    for s in train_subjects:
-        train_files.extend(subject_files[s])
-    for s in val_subjects:
-        val_files.extend(subject_files[s])
-    for s in test_subjects:
-        test_files.extend(subject_files[s])
+    train_files = [f for s in train_subjects for f in subject_files[s]]
+    val_files = [f for s in val_subjects for f in subject_files[s]]
+    test_files = [f for s in test_subjects for f in subject_files[s]]
     
     # Compute activity coverage per split
     def get_activities(files: List[str]) -> set:
         activities = set()
         for f in files:
-            if f in all_trials:
-                activities.add(all_trials[f]['activity'])
+            bvh_key = to_bvh_key(f)
+            if bvh_key in all_trials:
+                activities.add(all_trials[bvh_key]['activity'])
         return activities
     
     train_activities = get_activities(train_files)
@@ -369,23 +269,3 @@ def print_subject_disjoint_split_info(split_info: dict):
     print(f"    Val:   {split_info['activity_coverage']['val']}")
     print(f"    Test:  {split_info['activity_coverage']['test']}")
     print(f"  Activities in all splits: {split_info['activity_overlap']['all']}")
-
-
-def print_activity_split_info(split_info: dict):
-    """Print activity split information."""
-    print(f"\n✓ Activity-based split:")
-    print(f"  Activities: {len(split_info['activities'])}")
-    for act, dist in sorted(split_info['activity_distribution'].items()):
-        print(f"    {act}: {dist['train']} train / {dist['val']} val")
-    print(f"  Activity overlap: {len(split_info['activity_overlap'])}/{len(split_info['activities'])}")
-    print(f"  Train: {split_info['train_files']} files, Val: {split_info['val_files']} files")
-
-
-# Keep old functions for backward compatibility
-def stratified_split(*args, **kwargs):
-    """Alias for activity_stratified_split (backward compatibility)."""
-    return activity_stratified_split(*args, **kwargs)
-
-def print_split_info(split_info: dict):
-    """Alias for print_activity_split_info (backward compatibility)."""
-    return print_activity_split_info(split_info)

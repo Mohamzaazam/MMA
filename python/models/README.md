@@ -1,22 +1,25 @@
 # Motion Models
 
-Neural network models for motion prediction pre-training.
+Neural networks for motion prediction pre-training.
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `motion_nn.py` | MotionNN class with MLP and Transformer backends |
-| `train_motion.py` | Training script with TensorBoard logging |
+| `motion_nn.py` | MotionNN model (MLP / Transformer) |
+| `train_motion.py` | Training script with multi-step horizon |
+| `eval_motion.py` | Evaluation and visualization |
 
 ## MotionNN
 
-Motion prediction model: `s_t → s_{t+1}`
+Motion predictor: `state_t → state_{t+1}`
 
 **Modes:**
-- `mlp`: 3-layer MLP, single-step prediction
-- `transformer_reg`: Transformer encoder, sequence → next frame
-- `transformer_ar`: Transformer, sequence → next sequence
+| Mode | Input | Output | Use Case |
+|------|-------|--------|----------|
+| `mlp` | (batch, dim) | (batch, dim) | Fast, single-frame |
+| `encoder` | (batch, seq, dim) | (batch, dim) | Sequence context → next |
+| `seq2seq` | (batch, seq, dim) | (batch, seq, dim) | Full sequence prediction |
 
 ```python
 from python.models import MotionNN
@@ -24,113 +27,57 @@ from python.models import MotionNN
 # MLP mode
 model = MotionNN(state_dim=112, mode='mlp')
 
-# Transformer mode
-model = MotionNN(state_dim=112, mode='transformer_reg', seq_len=16)
+# Transformer encoder mode  
+model = MotionNN(state_dim=112, mode='encoder', seq_len=32)
 
-# Save/load
-model.save('nn/motion_model.pt')
-model = MotionNN.load('nn/motion_model.pt')
+# Autoregressive rollout
+trajectory = model.rollout(initial_state, steps=60)
 ```
 
 ## Training
 
 ```bash
-# Train on specific files (MLP)
+# Basic training
 pixi run python python/models/train_motion.py \
-    --bvh_files data/motion/walk.bvh data/motion/run.bvh \
+    --extracted_dir data/extracted \
     --mode mlp \
     --epochs 100
 
-# Train on CMU data with subject-disjoint activity split (recommended)
+# Multi-step horizon training (16-step lookahead)
 pixi run python python/models/train_motion.py \
-    --bvh_dir data/cmu \
-    --mode transformer_reg \
-    --activity_split \
-    --test_ratio 0.15 \
-    --max_subjects 20 \
+    --extracted_dir data/extracted \
+    --mode mlp \
+    --max_horizon 16 \
+    --min_horizon 1 \
+    --multistep_ratio 0.3 \
     --epochs 50
-
-# View training metrics
-pixi run tensorboard
 ```
 
 **Key arguments:**
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--mode` | `mlp` | `mlp`, `transformer_reg`, `transformer_ar` |
-| `--subject_split` | off | Split by subject (prevents data leakage) |
-| `--activity_split` | off | Subject-disjoint activity split (no subject overlap + activity coverage) |
-| `--test_ratio` | `0.15` | Ratio of subjects held out for testing |
-| `--save_split` | auto | Path to save train/val/test split JSON |
-| `--max_subjects` | `10` | Limit subjects for testing |
-| `--epochs` | 100 | Training epochs |
-| `--verbose` | off | Show C++ parsing output (default: log to file) |
+| `--mode` | `mlp` | `mlp`, `encoder`, `seq2seq` |
+| `--max_horizon` | `1` | Max lookahead (1=single-step) |
+| `--min_horizon` | `1` | Min horizon for adaptive training |
+| `--multistep_ratio` | `0.3` | Fraction of batches using multi-step |
+| `--weighted_loss` | off | Separate pos/vel loss weighting |
 
 ## Evaluation
 
 ```bash
-# Evaluate on test set from training split (recommended)
+# Evaluate on test set
 pixi run python python/models/eval_motion.py \
     --model nn/motion_model_best.pt \
     --split_file nn/split_info.json \
-    --use_test_set \
-    --output_dir eval_test_results
+    --use_test_set
 
-# Evaluate on arbitrary BVH files
-pixi run python python/models/eval_motion.py \
-    --model nn/motion_model_best.pt \
-    --bvh_dir data/cmu \
-    --num_frames 500 \
-    --output_dir eval_results
+# View training metrics
+pixi run tensorboard --logdir runs
 ```
 
-**Evaluation arguments:**
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--split_file` | none | Load files from split JSON |
-| `--use_test_set` | off | Evaluate on held-out test set |
-| `--use_val_set` | off | Evaluate on validation set |
-| `--num_frames` | `500` | Frames for trajectory visualization |
-| `--num_samples` | `500` | Samples for statistical metrics |
+## Outputs
 
-**Outputs:**
-- `metrics.json` — All computed metrics (MSE, MAE, R², per-component)
-- `per_component_errors.png` — Bar chart of per-joint errors
-- `rollout_horizon.png` — Error vs prediction horizon
-- `trajectory.png` — Time series comparison
-- `joint_angles.png` — Lower limb joint angle tracking
-- `joint_scatter.png` — Prediction accuracy scatter
-- `error_distribution.png` — MSE histogram
-
-## Training Outputs
-
-- `nn/motion_model.pt` — Final checkpoint
-- `nn/motion_model_best.pt` — Best validation loss
-- `nn/motion_normalizer.npz` — Normalization parameters
-- `nn/split_info.json` — Train/val/test split (subjects and files)
-- `nn/training.log` — C++ parsing output
-- `runs/motion_model/` — TensorBoard logs (includes position/velocity/limb losses)
-
----
-
-## RL vs MotionNN: Key Differences
-
-| Aspect | RL (SimulationNN + MuscleNN) | Supervised (MotionNN) |
-|--------|------------------------------|----------------------|
-| **Predicts** | Position offsets → SPD → Torques → Activations | Next state directly |
-| **Training signal** | Reward from physics simulation | MSE vs BVH ground truth |
-| **Physics** | Uses DART simulation | No physics |
-| **Muscles** | Yes (Hill model) | No |
-| **Purpose** | Control policy for simulation | Motion prior for pre-training |
-
----
-
-## Potential Uses for MotionNN
-
-MotionNN learns **motion dynamics** from BVH data:
-
-1. **Motion prior** — Regularize RL policy to stay close to natural motions
-2. **Warm-start** — Initialize policy with motion knowledge
-3. **Reference generator** — Replace BVH file lookup during training
-4. **Model-based RL** — Use as world model for planning
-
+- `nn/motion_model_best.pt` — Best checkpoint
+- `nn/motion_normalizer.npz` — Normalization parameters  
+- `nn/split_info.json` — Train/val/test split
+- `runs/motion_model/` — TensorBoard logs

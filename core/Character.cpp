@@ -95,6 +95,26 @@ LoadBVH(const std::string& path,bool cyclic)
 		std::cout << "BVH Parse Error: " << errMsg << std::endl;
 	}
 }
+
+bool
+Character::
+ReloadBVH(const std::string& path, bool cyclic)
+{
+	if(mBVH == nullptr){
+		return false;
+	}
+	// Reset transformation before loading new BVH
+	mTc = Eigen::Isometry3d::Identity();
+	
+	std::string errMsg;
+	if(!mBVH->Parse(path, errMsg, cyclic)){
+		return false;
+	}
+	
+	// Reset with new BVH
+	Reset();
+	return true;
+}
 void
 Character::
 Reset()

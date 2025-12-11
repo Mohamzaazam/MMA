@@ -1,52 +1,58 @@
 # Python Utilities
 
-Utilities for data processing, dataset creation, and mocap analysis.
+Data processing and dataset utilities for motion prediction training.
 
 ## Modules
 
 | Module | Description |
 |--------|-------------|
-| `bvh_dataset.py` | PyTorch Dataset for BVH motion data |
-| `state_extractor.py` | C++ pymss integration for DART states |
-| `verify_conversion.py` | BVH conversion integrity checking |
-| `scrape_mocap_metadata.py` | CMU mocap metadata scraper |
-| `truncate_mocap.py` | Truncate motion capture files |
+| `datasets.py` | `BVHDataset` and `ExtractedBVHDataset` for PyTorch training |
+| `normalization.py` | `StateNormalizer` for mean/std normalization |
+| `splits.py` | Subject-disjoint train/val/test splitting |
+| `state_extractor.py` | C++ pymss integration for DART state extraction |
+| `extract_states.py` | Script to pre-extract BVH → NPZ files |
 
-## BVH Dataset Pipeline
+## Quick Start
 
-For motion model pre-training:
-
-```python
-# Small datasets (in-memory)
-from python.utils.bvh_dataset import BVHDataset, train_val_split
-
-train_ds, val_ds = train_val_split('data/cmu', train_ratio=0.8)
-
-# Large datasets (disk-based)
-from python.utils.bvh_dataset import extract_to_disk, LazyBVHDataset
-
-# Step 1: Extract to disk (once)
-files, norm = extract_to_disk(bvh_files, 'data/extracted')
-
-# Step 2: Lazy loading
-dataset = LazyBVHDataset(files, normalizer_path='data/extracted/normalizer.npz')
-```
-
-## State Extraction
-
-Extract DART-compatible states from BVH:
+### Dataset Loading
 
 ```python
-from python.utils.state_extractor import BVHStateExtractor
+from python.utils import ExtractedBVHDataset, StateNormalizer
 
-extractor = BVHStateExtractor('data/metadata.txt', 'build')
-states = extractor.extract_all_states()  # (N, 112) - 56 pos + 56 vel
+# Load pre-extracted NPZ files (fast)
+dataset = ExtractedBVHDataset(
+    npz_files=['data/extracted/01_01.npz', ...],
+    mode='mlp',        # or 'transformer', 'autoregressive'
+    max_horizon=16,    # Multi-step targets (1=single-step)
+)
+
+# Access samples
+x, y = dataset[0]  # x: state_t, y: state_t+1 (or horizon targets)
 ```
 
-## Verify Conversion
+### Subject-Disjoint Split
 
-Check BVH file integrity after conversion:
+```python
+from python.utils import subject_disjoint_activity_split
+
+train, val, test, info = subject_disjoint_activity_split(
+    bvh_root='data/cmu',
+    train_ratio=0.7,
+    test_ratio=0.15,
+)
+```
+
+### State Extraction
 
 ```bash
-pixi run python python/utils/verify_conversion.py data/cmu --source /mnt/e/database/cmu --fix --reconvert
+# Extract BVH files to NPZ (run once)
+pixi run python python/utils/extract_states.py \
+    --bvh_dir data/cmu \
+    --output_dir data/extracted \
+    --max_subjects 50
 ```
+
+## File Formats
+
+- **BVH** → Raw motion capture (requires C++ pymss)
+- **NPZ** → Pre-extracted states (112D: 56 pos + 56 vel)

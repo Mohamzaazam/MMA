@@ -109,6 +109,22 @@ class BVHStateExtractor:
             states_t.append(s_t)
             states_t1.append(s_t1)
         return np.array(states_t), np.array(states_t1)
+    
+    def reload_bvh(self, bvh_path: str, cyclic: bool = False) -> bool:
+        """
+        Reload a new BVH file into the existing environment.
+        
+        This reuses the skeleton and muscles, only parsing the new BVH data.
+        Much more memory-efficient than creating a new extractor.
+        
+        Args:
+            bvh_path: Path to the new BVH file
+            cyclic: Whether the motion is cyclic
+            
+        Returns:
+            True if reload succeeded, False otherwise
+        """
+        return self.env.ReloadBVH(bvh_path, cyclic)
 
 
 def create_state_extractor(
@@ -132,6 +148,7 @@ def create_state_extractor(
         Configured BVHStateExtractor
     """
     import tempfile
+    import atexit
     
     metadata_content = f"""use_muscle true
 con_hz 30
@@ -146,4 +163,14 @@ reward_param 0.75 0.1 0.0 0.15
         f.write(metadata_content)
         temp_path = f.name
     
-    return BVHStateExtractor(temp_path, build_dir)
+    extractor = BVHStateExtractor(temp_path, build_dir)
+    
+    # Register cleanup on process exit
+    def cleanup():
+        try:
+            Path(temp_path).unlink(missing_ok=True)
+        except:
+            pass
+    atexit.register(cleanup)
+    
+    return extractor

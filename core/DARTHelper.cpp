@@ -1,4 +1,5 @@
 #include "DARTHelper.h"
+#include "Verbose.h"
 #include <tinyxml.h>
 using namespace dart::dynamics;
 
@@ -249,7 +250,7 @@ BuildFromFile(const std::string& path,bool create_obj)
 	TiXmlElement *skeleton_elem = doc.FirstChildElement("Skeleton");
 	std::string skel_name = skeleton_elem->Attribute("name");
 	SkeletonPtr skel = Skeleton::create(skel_name);
-	std::cout << skel_name;
+	if (MASS::gVerbose) std::cout << skel_name;
 
 	for(TiXmlElement* node = skeleton_elem->FirstChildElement("Node");node != nullptr;node = node->NextSiblingElement("Node"))
 	{
@@ -361,6 +362,6 @@ BuildFromFile(const std::string& path,bool create_obj)
 		}
 	}
 
-	std::cout<<"(DOFs : "<<skel->getNumDofs()<<")"<< std::endl;
+	if (MASS::gVerbose) std::cout<<"(DOFs : "<<skel->getNumDofs()<<")"<< std::endl;
 	return skel;
 }

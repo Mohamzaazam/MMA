@@ -95,6 +95,7 @@ add_library(MASS SHARED
     core/DARTHelper.cpp
     core/Environment.cpp
     core/Muscle.cpp
+    core/Verbose.cpp
 )
 
 target_include_directories(MASS PUBLIC 

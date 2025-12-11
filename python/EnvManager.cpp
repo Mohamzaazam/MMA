@@ -1,6 +1,7 @@
 #include "EnvManager.h"
 #include "DARTHelper.h"
 #include "BVH.h"
+#include "Verbose.h"
 #include <omp.h>
 
 EnvManager::
@@ -358,8 +359,33 @@ GetTargetPosAndVel(double t)
 	return mEnvs[0]->GetCharacter()->GetTargetPosAndVel(t, dt);
 }
 
+bool
+EnvManager::
+ReloadBVH(const std::string& path, bool cyclic)
+{
+	return mEnvs[0]->GetCharacter()->ReloadBVH(path, cyclic);
+}
+
+// =============================================================================
+// Verbose Control
+// =============================================================================
+
+void SetVerbose(bool verbose)
+{
+	MASS::gVerbose = verbose;
+}
+
+bool GetVerbose()
+{
+	return MASS::gVerbose;
+}
+
 PYBIND11_MODULE(pymss, m)
 {
+	// Module-level verbose control functions
+	m.def("set_verbose", &SetVerbose, "Set C++ verbose output (true/false)");
+	m.def("get_verbose", &GetVerbose, "Get C++ verbose output setting");
+	
 	py::class_<EnvManager>(m, "pymss")
 		.def(py::init<std::string,int>())
 		.def("GetNumState",&EnvManager::GetNumState)
@@ -394,5 +420,6 @@ PYBIND11_MODULE(pymss, m)
 		.def("GetBVHFrameTime",&EnvManager::GetBVHFrameTime)
 		.def("GetBVHMaxTime",&EnvManager::GetBVHMaxTime)
 		.def("GetTargetPositions",&EnvManager::GetTargetPositions)
-		.def("GetTargetPosAndVel",&EnvManager::GetTargetPosAndVel);
+		.def("GetTargetPosAndVel",&EnvManager::GetTargetPosAndVel)
+		.def("ReloadBVH",&EnvManager::ReloadBVH, py::arg("path"), py::arg("cyclic") = false);
 }

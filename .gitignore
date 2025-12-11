@@ -11,6 +11,7 @@ runs/
 logs/
 data/outputs/
 data/cmu/
+data/extracted/
 # allow json and txt files in data/cmu
 !data/cmu/*.json
 !data/cmu/*.txt

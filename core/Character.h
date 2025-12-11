@@ -14,6 +14,7 @@ public:
 	void LoadSkeleton(const std::string& path,bool create_obj = false);
 	void LoadMuscles(const std::string& path);
 	void LoadBVH(const std::string& path,bool cyclic=true);
+	bool ReloadBVH(const std::string& path,bool cyclic=true);  // Reload BVH without recreating skeleton/muscles
 
 	void Reset();	
 	void SetPDParameters(double kp, double kv);
